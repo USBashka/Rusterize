@@ -154,11 +154,12 @@ def main():
     else:
         if sys.platform!='darwin' or not library:
             raise RuntimeError('macOS builds need macOS/Xcode and a staticlib target')
+        env['MACOSX_DEPLOYMENT_TARGET'] = '11.0'
         run(['cargo','build','--release','--lib','-p',name],env=env)
         artifact = output/(name+'.app')
         executable = artifact/'Contents/MacOS'/name
         executable.parent.mkdir(parents=True,exist_ok=True)
-        run(['swiftc','-Osize','-import-objc-header',ROOT/'hosts/rusterize.h',ROOT/'hosts/macos/main.swift',target_dir/'release'/('lib'+library+'.a'),'-framework','AppKit','-framework','CoreGraphics','-framework','CoreText','-o',executable],env=env)
+        run(['swiftc','-Osize','-target',platform.machine()+'-apple-macosx11.0','-import-objc-header',ROOT/'hosts/rusterize.h',ROOT/'hosts/macos/main.swift',target_dir/'release'/('lib'+library+'.a'),'-framework','AppKit','-framework','CoreGraphics','-framework','CoreText','-o',executable],env=env)
         with (artifact/'Contents/Info.plist').open('wb') as file:
             plistlib.dump({'CFBundleExecutable':name,'CFBundleName':name,'CFBundleIdentifier':args.app_id or 'dev.rusterize.app','CFBundlePackageType':'APPL','NSHighResolutionCapable':True,'LSMinimumSystemVersion':'11.0'},file)
         run(['codesign','--force','--sign','-',artifact],env=env)
