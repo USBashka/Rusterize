@@ -119,3 +119,122 @@ fn native_titlebar_colors_and_reset_without_showing_a_window() {
         DestroyWindow(hwnd).unwrap();
     }
 }
+
+#[test]
+fn native_text_metrics_wrapping_unicode_and_pagination() {
+    let style = TextStyle::new(22.0, Color::BLACK).font("Segoe UI");
+    let narrow = measure_text("iiiiii", &style).unwrap();
+    let wide = measure_text("WWWWWW", &style).unwrap();
+    assert!(wide.width > narrow.width * 2.0);
+    assert!(wide.baseline > 0.0 && wide.height >= wide.baseline);
+    assert!(
+        measure_text("text   ", &style)
+            .unwrap()
+            .width_including_trailing_whitespace
+            > measure_text("text", &style).unwrap().width
+    );
+    for text in [
+        "",
+        "\n",
+        "Ёж 👩‍💻 и е\u{301}\nالعربية\n",
+        "Нативная раскладка учитывает ширину глифов и переносит слова.",
+    ] {
+        let layout = TextLayout::new(text, style.clone(), TextOptions::wrap(110.0)).unwrap();
+        assert!(!layout.lines().is_empty());
+        assert_eq!(
+            layout
+                .lines()
+                .iter()
+                .map(|l| &text[l.range.clone()])
+                .collect::<String>(),
+            text
+        );
+        let first = &layout.lines()[0];
+        assert_eq!(
+            layout.fitting_prefix(first.top + first.height),
+            first.range.end
+        );
+        assert_eq!(layout.fitting_prefix(-1.0), 0);
+        assert_eq!(
+            layout.fitting_prefix(layout.metrics().height + 0.01),
+            text.len()
+        );
+    }
+    let layout =
+        TextLayout::new("слово слово слово", style.clone(), TextOptions::wrap(90.0)).unwrap();
+    assert!(layout.lines().len() >= 3);
+    assert!(layout.metrics().width <= 90.0);
+    assert!(measure_text("x", &TextStyle::new(f32::NAN, Color::BLACK)).is_err());
+    assert!(TextLayout::new("x", style, TextOptions::wrap(0.0)).is_err());
+}
+
+#[test]
+fn layout_measurement_and_native_draw_share_the_same_pixels() {
+    let style = TextStyle::new(22.0, Color::BLACK).italic().underline();
+    let layout = TextLayout::new("Ёж и AV", style.clone(), TextOptions::default()).unwrap();
+    let mut baseline = Scene::default();
+    let mut c = Canvas::new(&mut baseline);
+    c.clear(Color::WHITE);
+    c.text(
+        layout.text(),
+        (12.0, 12.0 + layout.metrics().baseline),
+        style,
+    );
+    c.finish().unwrap();
+    let mut block = Scene::default();
+    let mut c = Canvas::new(&mut block);
+    c.clear(Color::WHITE);
+    c.text_layout(&layout, (12.0, 12.0));
+    c.finish().unwrap();
+    for scale in [1.0, 1.5, 2.0] {
+        let a = windows::render_offscreen(&baseline, 400, 150, scale).unwrap();
+        let b = windows::render_offscreen(&block, 400, 150, scale).unwrap();
+        assert_eq!(a, b);
+        assert!(a.chunks_exact(4).any(|p| p[0] < 128));
+    }
+}
+
+#[test]
+fn full_native_drawing_and_directwrite_hit_testing_are_accessible() {
+    use ::windows::Win32::Graphics::{Direct2D::Common::*, DirectWrite::*};
+    let scene = Scene::default();
+    let pixels = windows::render_offscreen_with(&scene, 32, 32, 1.0, |native| {
+        unsafe {
+            let brush = native.target.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r: 1.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                None,
+            )?;
+            native.target.FillRectangle(
+                &D2D_RECT_F {
+                    left: 4.0,
+                    top: 4.0,
+                    right: 20.0,
+                    bottom: 20.0,
+                },
+                &brush,
+            );
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(pixel(&pixels, 32, 10, 10), [0, 0, 255, 255]);
+    let layout = windows::create_text_layout(
+        "AV Ёж",
+        &TextStyle::new(20.0, Color::BLACK),
+        TextOptions::default(),
+    )
+    .unwrap();
+    let (mut x, mut y, mut hit) = (0.0, 0.0, DWRITE_HIT_TEST_METRICS::default());
+    unsafe {
+        layout
+            .HitTestTextPosition(3, false, &mut x, &mut y, &mut hit)
+            .unwrap();
+    }
+    assert_eq!(hit.textPosition, 3);
+    assert!(x > 0.0 && hit.height > 0.0);
+}

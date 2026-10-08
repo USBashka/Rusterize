@@ -10,7 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(&output, windows::render_offscreen(scene, 960, 680, 1.0)?)?;
     let mut wire = Vec::new();
     protocol::encode(scene, &mut wire);
-    std::fs::write(format!("{output}.rz01"), wire)?;
+    std::fs::write(format!("{output}.rz02"), wire)?;
     println!("{output}: 960 × 680 premultiplied BGRA8");
     Ok(())
 }

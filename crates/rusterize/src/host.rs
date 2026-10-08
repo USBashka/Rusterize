@@ -37,6 +37,43 @@ impl<A: Application> Default for Host<A> {
     }
 }
 impl<A: Application> Host<A> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn native_draw(&mut self, id: u64, canvas: &native::HostCanvas<'_>) -> Result<(), Error> {
+        let entry = self
+            .entries
+            .get_mut(&id)
+            .ok_or_else(|| Error("invalid application handle".into()))?;
+        if entry.failed {
+            return Err(Error("application has failed".into()));
+        }
+        let viewport = entry.engine.viewport();
+        entry.engine.app.native_draw(canvas, viewport)
+    }
+    #[cfg(target_os = "android")]
+    pub fn native_draw(
+        &mut self,
+        id: u64,
+        canvas: &mut crate::android::NativeCanvas<'_, '_>,
+    ) -> Result<(), Error> {
+        let entry = self
+            .entries
+            .get_mut(&id)
+            .ok_or_else(|| Error("invalid application handle".into()))?;
+        if entry.failed {
+            return Err(Error("application has failed".into()));
+        }
+        let viewport = entry.engine.viewport();
+        entry.engine.app.native_draw(canvas, viewport)
+    }
+    pub fn pop_native_request(
+        &mut self,
+        id: u64,
+    ) -> Option<(native::RequestId, native::NativeRequest)> {
+        self.entries
+            .get_mut(&id)
+            .filter(|e| !e.failed)
+            .and_then(|e| e.engine.pop_native_request())
+    }
     pub fn create(&mut self, app: A) -> u64 {
         let id = self.next;
         self.next = self
@@ -223,7 +260,29 @@ pub fn decode_key(code: u32) -> Key {
 macro_rules! export_app {
     ($app:ty) => {
         std::thread_local! { static RUSTERIZE_HOST: std::cell::RefCell<$crate::host::Host<$app>> = std::cell::RefCell::new($crate::host::Host::default()); }
+        std::thread_local! { static RUSTERIZE_POLLING: std::cell::Cell<bool> = const {std::cell::Cell::new(false)}; }
+        /// # Safety
+        /// The callback must satisfy rusterize::native::set_c_service's contract.
+        #[no_mangle] pub unsafe extern "C" fn rusterize_set_native_service(callback:$crate::native::ServiceCallback) {unsafe {$crate::native::set_c_service(callback);}}
+        #[no_mangle] pub extern "C" fn rusterize_poll_native(id:u64)->u32 {
+            if RUSTERIZE_POLLING.with(|p|p.replace(true)) {return rusterize_status(id);}
+            for _ in 0..64 {
+                let request=RUSTERIZE_HOST.with(|h|h.borrow_mut().pop_native_request(id));
+                let Some((request_id,request))=request else {break};
+                let result=$crate::native::execute_host_request(&request);
+                RUSTERIZE_HOST.with(|h|h.borrow_mut().event(id,$crate::Event::NativeResult{id:request_id,result}));
+            }
+            RUSTERIZE_POLLING.with(|p|p.set(false));rusterize_status(id)
+        }
         #[no_mangle] pub extern "C" fn rusterize_create() -> u64 { RUSTERIZE_HOST.with(|h| h.borrow_mut().create(<$app>::default())) }
+        /// # Safety
+        /// The pointers must be live, borrowed native objects on the calling UI thread.
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        #[no_mangle] pub unsafe extern "C" fn rusterize_native_draw(id:u64,context:*mut std::ffi::c_void,view:*mut std::ffi::c_void,window:*mut std::ffi::c_void)->u32 {
+            let platform=if cfg!(target_os="linux") {$crate::native::HostPlatform::Gtk} else {$crate::native::HostPlatform::AppKit};
+            let canvas=unsafe {$crate::native::HostCanvas::from_raw(platform,context,view,window)};
+            RUSTERIZE_HOST.with(|h|h.borrow_mut().native_draw(id,&canvas)).map_or($crate::host::FAILED,|_|0)
+        }
         #[no_mangle] pub extern "C" fn rusterize_destroy(id: u64) { RUSTERIZE_HOST.with(|h| h.borrow_mut().destroy(id)); }
         #[no_mangle] pub extern "C" fn rusterize_status(id: u64) -> u32 { RUSTERIZE_HOST.with(|h| h.borrow().status(id)) }
         #[no_mangle] pub extern "C" fn rusterize_title(id:u64)->*const std::ffi::c_char {RUSTERIZE_HOST.with(|h|h.borrow().title(id).as_ptr())}
@@ -255,10 +314,22 @@ macro_rules! __android_exports {
     () => {
         #[no_mangle]
         pub extern "system" fn Java_dev_rusterize_RusterizeView_nativeCreate(
+            mut env: $crate::jni::JNIEnv,
+            class: $crate::jni::objects::JClass,
+        ) -> $crate::jni::sys::jlong {
+            if let Err(error) = $crate::android::install_service(&mut env, class) {
+                let _ = env.throw_new("java/lang/IllegalStateException", error.to_string());
+                return 0;
+            }
+            rusterize_create() as i64
+        }
+        #[no_mangle]
+        pub extern "system" fn Java_dev_rusterize_RusterizeView_nativePoll(
             _: $crate::jni::JNIEnv,
             _: $crate::jni::objects::JClass,
-        ) -> $crate::jni::sys::jlong {
-            rusterize_create() as i64
+            id: i64,
+        ) -> i32 {
+            rusterize_poll_native(id as u64) as i32
         }
         #[no_mangle]
         pub extern "system" fn Java_dev_rusterize_RusterizeView_nativeDestroy(
@@ -267,6 +338,25 @@ macro_rules! __android_exports {
             id: i64,
         ) {
             rusterize_destroy(id as u64);
+        }
+        #[no_mangle]
+        pub extern "system" fn Java_dev_rusterize_RusterizeView_nativeDraw<'local>(
+            mut env: $crate::jni::JNIEnv<'local>,
+            _: $crate::jni::objects::JClass<'local>,
+            id: i64,
+            canvas: $crate::jni::objects::JObject<'local>,
+            view: $crate::jni::objects::JObject<'local>,
+        ) {
+            let mut native = $crate::android::NativeCanvas {
+                env: &mut env,
+                canvas,
+                view,
+            };
+            let result =
+                RUSTERIZE_HOST.with(|h| h.borrow_mut().native_draw(id as u64, &mut native));
+            if let Err(e) = result {
+                let _ = env.throw_new("java/lang/IllegalStateException", e.to_string());
+            }
         }
         #[no_mangle]
         pub extern "system" fn Java_dev_rusterize_RusterizeView_nativeEvent(
@@ -367,7 +457,7 @@ mod tests {
         let b = h.create(App);
         assert_ne!(a, b);
         assert_eq!(h.frame(a, Viewport::default(), 0.0), 0);
-        assert!(h.bytes(a).starts_with(b"RZ01"));
+        assert!(h.bytes(a).starts_with(b"RZ02"));
         h.destroy(a);
         h.destroy(a);
         assert_eq!(h.status(a), FAILED);

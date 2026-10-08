@@ -47,6 +47,19 @@ jobs:
       - run: cargo doc --workspace --no-deps --locked
       - name: Package native app
         run: python scripts/build.py --platform ${{ matrix.platform }}
+      - name: Package native API example
+        run: python scripts/build.py --platform ${{ matrix.platform }} --package rusterize-native-api
+      - name: Linux text layout self-check and snapshot
+        if: runner.os == 'Linux'
+        run: dist/rusterize-native-api --snapshot dist/native-api-linux.png
+      - name: macOS text layout self-check and snapshot
+        if: runner.os == 'macOS'
+        run: dist/rusterize-native-api.app/Contents/MacOS/rusterize-native-api --snapshot dist/native-api-macos.png
+      - name: Windows text layout self-check and snapshot
+        if: runner.os == 'Windows'
+        run: |
+          dist/native-api.exe dist/native-api.bgra
+          python scripts/bgra_to_png.py dist/native-api.bgra dist/native-api-windows.png --width 800 --height 600
       - name: Linux native snapshot
         if: runner.os == 'Linux'
         run: dist/rusterize-gallery --snapshot dist/gallery-linux.png
@@ -103,6 +116,8 @@ jobs:
         run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'ndk;27.2.12479018'
       - name: Build and verify APK
         run: python3 scripts/build.py --platform android --ndk "$ANDROID_HOME/ndk/27.2.12479018" --abi arm64-v8a --abi x86_64
+      - name: Build native API example
+        run: python3 scripts/build.py --platform android --package rusterize-native-api --ndk "$ANDROID_HOME/ndk/27.2.12479018" --abi arm64-v8a --abi x86_64
       - uses: actions/upload-artifact@v4
         with:
           name: rusterize-android

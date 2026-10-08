@@ -59,6 +59,10 @@ pub struct Modifiers {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
+    NativeResult {
+        id: native::RequestId,
+        result: Result<native::NativeResponse, Error>,
+    },
     Resize(Viewport),
     /// IDs are stable for one contact. Mouse is zero. Buttons: left=1, right=2, middle=4.
     Pointer {
@@ -95,8 +99,58 @@ pub struct Context {
     pub(crate) exit: bool,
     window: WindowOptions,
     window_revision: u32,
+    native_requests: std::collections::VecDeque<(native::RequestId, native::NativeRequest)>,
+    next_request: u64,
 }
 impl Context {
+    /// Queue a native operation; completion is delivered as `Event::NativeResult`.
+    pub fn native_request(&mut self, request: native::NativeRequest) -> native::RequestId {
+        self.next_request = self
+            .next_request
+            .checked_add(1)
+            .expect("native request IDs exhausted");
+        let id = native::RequestId(self.next_request);
+        self.native_requests.push_back((id, request));
+        self.request_redraw();
+        id
+    }
+    pub fn read_clipboard(&mut self) -> native::RequestId {
+        self.native_request(native::NativeRequest::ReadClipboard)
+    }
+    pub fn write_clipboard(&mut self, text: impl Into<String>) -> native::RequestId {
+        self.native_request(native::NativeRequest::WriteClipboard(text.into()))
+    }
+    pub fn set_cursor(&mut self, cursor: native::Cursor) -> native::RequestId {
+        self.native_request(native::NativeRequest::SetCursor(cursor))
+    }
+    pub fn set_window_state(&mut self, state: native::WindowState) -> native::RequestId {
+        self.native_request(native::NativeRequest::SetWindowState(state))
+    }
+    pub fn set_window_size(&mut self, size: Size) -> native::RequestId {
+        self.native_request(native::NativeRequest::SetWindowSize(size))
+    }
+    pub fn set_window_position(&mut self, position: Point) -> native::RequestId {
+        self.native_request(native::NativeRequest::SetWindowPosition(position))
+    }
+    pub fn set_always_on_top(&mut self, enabled: bool) -> native::RequestId {
+        self.native_request(native::NativeRequest::SetAlwaysOnTop(enabled))
+    }
+    pub fn file_dialog(&mut self, options: native::FileDialog) -> native::RequestId {
+        self.native_request(native::NativeRequest::FileDialog(options))
+    }
+    pub fn message_dialog(
+        &mut self,
+        title: impl Into<String>,
+        message: impl Into<String>,
+    ) -> native::RequestId {
+        self.native_request(native::NativeRequest::MessageDialog {
+            title: title.into(),
+            message: message.into(),
+        })
+    }
+    pub fn open_uri(&mut self, uri: impl Into<String>) -> native::RequestId {
+        self.native_request(native::NativeRequest::OpenUri(uri.into()))
+    }
     pub fn request_redraw(&mut self) {
         self.redraw = true;
     }
@@ -130,6 +184,40 @@ impl Context {
 }
 
 pub trait Application {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn native_draw(
+        &mut self,
+        _canvas: &native::HostCanvas<'_>,
+        _viewport: Viewport,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+    #[cfg(target_os = "android")]
+    fn native_draw(
+        &mut self,
+        _canvas: &mut crate::android::NativeCanvas<'_, '_>,
+        _viewport: Viewport,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+    /// Platform extension for all Direct2D/DirectWrite operations. Do not call BeginDraw/EndDraw.
+    #[cfg(all(windows, feature = "native"))]
+    fn native_draw(
+        &mut self,
+        _canvas: &crate::windows::NativeCanvas<'_>,
+        _viewport: Viewport,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+    /// Return Some only for messages handled by the application. Framework lifecycle and paint messages are reserved.
+    #[cfg(all(windows, feature = "native"))]
+    fn native_event(
+        &mut self,
+        _message: crate::windows::WindowMessage,
+    ) -> Option<::windows::Win32::Foundation::LRESULT> {
+        None
+    }
+
     /// Initial window settings, also consumed by Android, GTK and AppKit hosts.
     fn window_options(&self) -> WindowOptions {
         WindowOptions::default()
@@ -228,6 +316,9 @@ pub struct Engine<A: Application> {
     last_frame: Option<f64>,
 }
 impl<A: Application> Engine<A> {
+    pub fn pop_native_request(&mut self) -> Option<(native::RequestId, native::NativeRequest)> {
+        self.context.native_requests.pop_front()
+    }
     pub fn new(app: A) -> Self {
         let options = app.window_options();
         Self::with_options(app, options)
@@ -255,6 +346,10 @@ impl<A: Application> Engine<A> {
     pub fn window_revision(&self) -> u32 {
         self.context.window_revision
     }
+    #[cfg(all(windows, feature = "native"))]
+    pub(crate) fn drawing_parts(&mut self) -> (&mut A, &Scene) {
+        (&mut self.app, &self.scene)
+    }
     pub fn viewport(&self) -> Viewport {
         self.viewport
     }
@@ -281,7 +376,9 @@ impl<A: Application> Engine<A> {
         self.app.event(event, &mut self.context);
     }
     pub fn needs_redraw(&self) -> bool {
-        !self.suspended && self.context.redraw && !self.context.exit
+        !self.suspended
+            && (self.context.redraw || !self.context.native_requests.is_empty())
+            && !self.context.exit
     }
     pub fn is_animating(&self) -> bool {
         self.context.animate && !self.suspended && !self.context.exit

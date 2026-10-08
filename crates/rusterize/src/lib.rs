@@ -17,13 +17,16 @@ mod app;
 mod canvas;
 mod geometry;
 pub mod host;
+pub mod native;
 mod paint;
 pub mod protocol;
+mod text;
 
 pub use app::*;
 pub use canvas::*;
 pub use geometry::*;
 pub use paint::*;
+pub use text::*;
 
 #[cfg(target_os = "android")]
 #[doc(hidden)]

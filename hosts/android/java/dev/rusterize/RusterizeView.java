@@ -2,6 +2,13 @@ package dev.rusterize;
 
 import android.app.Activity;
 import android.content.Context;
+import android.content.ClipboardManager;
+import android.content.ClipData;
+import android.content.Intent;
+import android.net.Uri;
+import android.text.*;
+import java.io.ByteArrayOutputStream;
+import java.lang.ref.WeakReference;
 import android.graphics.*;
 import android.util.LongSparseArray;
 import android.view.*;
@@ -14,6 +21,9 @@ import java.util.HashSet;
 public final class RusterizeView extends View implements AutoCloseable {
     static { System.loadLibrary("rusterize_app"); }
     private static native long nativeCreate();
+    private static native int nativePoll(long id);
+    private static native void nativeDraw(long id,Canvas canvas,View view);
+    private static WeakReference<RusterizeView> active = new WeakReference<>(null);
     private static native void nativeDestroy(long id);
     private static native int nativeStatus(long id);
     private static native int nativeOption(long id,int option);
@@ -33,16 +43,13 @@ public final class RusterizeView extends View implements AutoCloseable {
     private float shapeRadius;
     private final LongSparseArray<Bitmap> bitmaps = new LongSparseArray<>();
     private final HashSet<Long> usedImages = new HashSet<>();
-    private final Typeface[] fonts = new Typeface[] {
-        Typeface.create("sans-serif", 0), Typeface.create("serif", 0), Typeface.create("monospace", 0),
-        Typeface.create("sans-serif", 1), Typeface.create("serif", 1), Typeface.create("monospace", 1)
-    };
     public RusterizeView(Context context) {
-        super(context); setFocusable(true); setFocusableInTouchMode(true);
+        super(context); active = new WeakReference<>(this); setFocusable(true); setFocusableInTouchMode(true);
         paint.setStrokeCap(Paint.Cap.BUTT); paint.setStrokeJoin(Paint.Join.MITER); paint.setStrokeMiter(10);
     }
     private float density() { return getResources().getDisplayMetrics().density; }
     private void schedule(int flags) {
+        flags = nativePoll(handle);
         if ((flags & 0x80000000) != 0) throw new IllegalStateException("Rusterize native application failed");
         if ((flags & 4) != 0) { if (getContext() instanceof Activity) ((Activity)getContext()).finish(); return; }
         updateChrome();
@@ -85,7 +92,10 @@ public final class RusterizeView extends View implements AutoCloseable {
         try {
             canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR);
             canvas.scale(scale, scale);
+            int commands = canvas.save();
             replay(canvas, ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN));
+            canvas.restoreToCount(commands);
+            nativeDraw(handle,canvas,this);
         } finally { canvas.restoreToCount(saved); }
         schedule(nativeStatus(handle));
     }
@@ -105,7 +115,7 @@ public final class RusterizeView extends View implements AutoCloseable {
             case 3:
                 int n=b.getInt();
                 for (int i=0;i<n;i++) {
-                    switch(b.getInt()) {
+                    int opcode=b.getInt();switch(opcode) {
                         case 0: path.moveTo(b.getFloat(),b.getFloat()); break;
                         case 1: path.lineTo(b.getFloat(),b.getFloat()); break;
                         case 2: path.cubicTo(b.getFloat(),b.getFloat(),b.getFloat(),b.getFloat(),b.getFloat(),b.getFloat()); break;
@@ -134,10 +144,10 @@ public final class RusterizeView extends View implements AutoCloseable {
         else c.drawPath(path,paint);
     }
     private void replay(Canvas c, ByteBuffer b) {
-        if (b.getInt()!=0x31305a52) throw new IllegalStateException("Unsupported Rusterize protocol");
+        if (b.getInt()!=0x32305a52) throw new IllegalStateException("Unsupported Rusterize protocol");
         int count=b.getInt(),depth=0; usedImages.clear();
         for (int i=0;i<count;i++) {
-            switch (b.getInt()) {
+            int opcode=b.getInt();switch (opcode) {
                 case 1: c.drawColor(rgba(b),PorterDuff.Mode.SRC); break;
                 case 2: c.save(); depth++; break;
                 case 3: if(depth--<=0)throw new IllegalStateException("Unbalanced restore");c.restore();break;
@@ -149,10 +159,10 @@ public final class RusterizeView extends View implements AutoCloseable {
                 case 6: {int kind=shape(b);brush(b);paint.setStyle(Paint.Style.FILL);drawShape(c,kind);break;}
                 case 7: {int kind=shape(b);brush(b);paint.setStyle(Paint.Style.STROKE);paint.setStrokeWidth(b.getFloat());drawShape(c,kind);break;}
                 case 8:
-                    float x=b.getFloat(),y=b.getFloat(),size=b.getFloat();int color=rgba(b),family=b.getInt(),bold=b.getInt();
-                    int length=b.getInt();byte[] utf8=new byte[length];b.get(utf8);
-                    paint.setShader(null);paint.setColor(color);paint.setStyle(Paint.Style.FILL);paint.setTextSize(size);paint.setTypeface(fonts[family+(bold!=0?3:0)]);
-                    c.drawText(new String(utf8,StandardCharsets.UTF_8),x,y,paint);break;
+                case 10: {
+                    float x=b.getFloat(),y=b.getFloat(); NativeText t=new NativeText(b);
+                    int save=c.save();c.translate(x+t.offsetX,y-(opcode==8?t.layout.getLineBaseline(0):0));t.layout.draw(c);c.restoreToCount(save);break;
+                }
                 case 9:
                     long id=b.getLong();int width=b.getInt(),height=b.getInt();rectangle(b);float opacity=b.getFloat();int len=b.getInt();
                     if(len!=(long)width*height*4)throw new IllegalStateException("Invalid image dimensions");
@@ -169,6 +179,67 @@ public final class RusterizeView extends View implements AutoCloseable {
         if(depth!=0 || b.hasRemaining())throw new IllegalStateException("Invalid display-list length");
         for(int i=bitmaps.size()-1;i>=0;i--)if(!usedImages.contains(bitmaps.keyAt(i)))bitmaps.removeAt(i);
     }
+
+    private static String string(ByteBuffer b) {byte[] data=new byte[b.getInt()];b.get(data);return new String(data,StandardCharsets.UTF_8);}
+    private static void integer(ByteArrayOutputStream out,int v) {out.write(v);out.write(v>>>8);out.write(v>>>16);out.write(v>>>24);}
+    private static void real(ByteArrayOutputStream out,float v) {integer(out,Float.floatToIntBits(v));}
+    private static void raw(ByteArrayOutputStream out,byte[] data) {out.write(data,0,data.length);}
+    private static final class NativeText {
+        final String text;
+        final StaticLayout layout;
+        final float offsetX;
+        NativeText(ByteBuffer b) {
+            float size=b.getFloat();int color=rgba(b),family=b.getInt(),flags=b.getInt();String font=string(b);
+            float width=b.getFloat();int wrap=b.getInt(),align=b.getInt(),direction=b.getInt();text=string(b);
+            if(wrap==2)throw new UnsupportedOperationException("Character wrapping is not exposed by Android StaticLayout");
+            TextPaint p=new TextPaint(Paint.ANTI_ALIAS_FLAG|Paint.SUBPIXEL_TEXT_FLAG);
+            p.setColor(color);p.setTextSize(size);p.setTypeface(Typeface.create(font.isEmpty()?(family==0?"sans-serif":family==1?"serif":"monospace"):font,flags&3));
+            p.setUnderlineText((flags&4)!=0);p.setStrikeThruText((flags&8)!=0);
+            int actualWidth=(int)Math.ceil(wrap==0?Math.max(width,Layout.getDesiredWidth(text,p)):width);
+            offsetX=(width-actualWidth)*(align==1?0.5f:align==2?1f:0f);
+            Layout.Alignment alignment=align==1?Layout.Alignment.ALIGN_CENTER:((align==2) != (direction==1)?Layout.Alignment.ALIGN_OPPOSITE:Layout.Alignment.ALIGN_NORMAL);
+            layout=StaticLayout.Builder.obtain(text,0,text.length(),p,actualWidth).setAlignment(alignment)
+                .setTextDirection(direction==1?TextDirectionHeuristics.RTL:TextDirectionHeuristics.LTR)
+                .setIncludePad(false).setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE).setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE).build();
+        }
+        byte[] metrics() {
+            ByteArrayOutputStream out=new ByteArrayOutputStream();float width=0,full=0;
+            for(int i=0;i<layout.getLineCount();i++){width=Math.max(width,layout.getLineMax(i));full=Math.max(full,layout.getLineWidth(i));}
+            real(out,width);real(out,full);real(out,layout.getHeight());real(out,layout.getLineBaseline(0));integer(out,layout.getLineCount());
+            int[] bytes=new int[text.length()+1];int offset=0;
+            for(int i=0;i<text.length();){int ch=text.codePointAt(i),units=Character.charCount(ch);for(int j=0;j<units;j++)bytes[i+j]=offset;offset+=ch<0x80?1:ch<0x800?2:ch<0x10000?3:4;i+=units;bytes[i]=offset;}
+            for(int i=0;i<layout.getLineCount();i++) {
+                integer(out,bytes[layout.getLineStart(i)]);integer(out,bytes[layout.getLineEnd(i)]);
+                real(out,layout.getLineTop(i));real(out,layout.getLineBottom(i)-layout.getLineTop(i));real(out,layout.getLineBaseline(i));
+            }
+            return out.toByteArray();
+        }
+    }
+    public static byte[] nativeService(byte[] data) {
+        ByteArrayOutputStream out=new ByteArrayOutputStream();
+        try {
+            ByteBuffer b=ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);int op=b.getInt();
+            integer(out,0);
+            if(op==1){raw(out,new NativeText(b).metrics());return out.toByteArray();}
+            if(op==2){integer(out,1|2|4|256|512);return out.toByteArray();}
+            RusterizeView view=active.get();if(view==null)throw new IllegalStateException("No active native view");
+            Context context=view.getContext();
+            switch(op) {
+                case 3: {
+                    ClipboardManager clipboard=(ClipboardManager)context.getSystemService(Context.CLIPBOARD_SERVICE);
+                    ClipData clip=clipboard.getPrimaryClip();CharSequence value=clip==null||clip.getItemCount()==0?"":clip.getItemAt(0).coerceToText(context);
+                    raw(out,(value==null?"":value.toString()).getBytes(StandardCharsets.UTF_8));break;
+                }
+                case 4: ((ClipboardManager)context.getSystemService(Context.CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("",string(b)));break;
+                case 5: {int[] types={PointerIcon.TYPE_ARROW,PointerIcon.TYPE_TEXT,PointerIcon.TYPE_HAND,PointerIcon.TYPE_CROSSHAIR,PointerIcon.TYPE_ALL_SCROLL,PointerIcon.TYPE_HORIZONTAL_DOUBLE_ARROW,PointerIcon.TYPE_VERTICAL_DOUBLE_ARROW,PointerIcon.TYPE_NULL};view.setPointerIcon(PointerIcon.getSystemIcon(context,types[b.getInt()]));break;}
+                case 11: new android.app.AlertDialog.Builder(context).setTitle(string(b)).setMessage(string(b)).setPositiveButton(android.R.string.ok,null).show();break;
+                case 12: context.startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(string(b))));break;
+                default: throw new UnsupportedOperationException("Native operation unavailable on Android: "+op);
+            }
+        } catch(Exception error) {out.reset();integer(out,1);raw(out,error.toString().getBytes(StandardCharsets.UTF_8));}
+        return out.toByteArray();
+    }
+
     @Override public boolean onTouchEvent(MotionEvent e) {
         float scale=density();int action=e.getActionMasked(),index=e.getActionIndex();
         if(action==MotionEvent.ACTION_DOWN) {requestFocus();getParent().requestDisallowInterceptTouchEvent(true);}

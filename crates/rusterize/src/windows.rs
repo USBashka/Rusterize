@@ -1,5 +1,26 @@
 //! Win32 + Direct2D/DirectWrite. No bundled renderer or windowing runtime.
 use crate::*;
+pub(crate) mod services;
+mod text;
+/// Native Windows SDK bindings. Enable additional features on windows 0.62 as needed.
+pub use ::windows as api;
+pub use services::current_window;
+pub use text::create_text_layout;
+
+/// Borrowed native drawing objects, valid during Application::native_draw.
+pub struct NativeCanvas<'a> {
+    pub factory: &'a ID2D1Factory,
+    pub target: &'a ID2D1RenderTarget,
+    pub text_factory: &'a IDWriteFactory,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct WindowMessage {
+    pub hwnd: HWND,
+    pub message: u32,
+    pub wparam: WPARAM,
+    pub lparam: LPARAM,
+}
+
 use ::windows::{
     core::{w, Interface, PCWSTR},
     Win32::{
@@ -121,7 +142,7 @@ pub struct D2dRenderer {
     solid: ID2D1SolidColorBrush,
     stroke: ID2D1StrokeStyle,
     images: HashMap<u64, ID2D1Bitmap>,
-    text: HashMap<(String, u32, u8, bool), (IDWriteTextLayout, f32)>,
+    text: HashMap<Vec<u8>, (IDWriteTextLayout, f32)>,
     lost: bool,
 }
 impl D2dRenderer {
@@ -262,54 +283,35 @@ impl D2dRenderer {
         }
         Ok(())
     }
-    fn text(&mut self, text: &str, baseline: Point, style: &TextStyle) -> Result<(), Error> {
-        let key = (
-            text.to_owned(),
-            style.size.to_bits(),
-            style.family as u8,
-            style.bold,
-        );
+    fn text(
+        &mut self,
+        text: &str,
+        position: Point,
+        style: &TextStyle,
+        options: TextOptions,
+        baseline: bool,
+    ) -> Result<(), Error> {
+        let mut key = crate::protocol::Writer(Vec::new());
+        key.text(text, style, options);
+        let key = key.0;
         if !self.text.contains_key(&key) {
             if self.text.len() >= 256 {
                 self.text.clear();
             }
-            unsafe {
-                let font = match style.family {
-                    FontFamily::Sans => w!("Segoe UI"),
-                    FontFamily::Serif => w!("Georgia"),
-                    FontFamily::Monospace => w!("Consolas"),
-                };
-                let format = self.write.CreateTextFormat(
-                    font,
-                    None,
-                    if style.bold {
-                        DWRITE_FONT_WEIGHT_BOLD
-                    } else {
-                        DWRITE_FONT_WEIGHT_NORMAL
-                    },
-                    DWRITE_FONT_STYLE_NORMAL,
-                    DWRITE_FONT_STRETCH_NORMAL,
-                    style.size,
-                    w!(""),
-                )?;
-                format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
-                let layout = self.write.CreateTextLayout(
-                    &text.encode_utf16().collect::<Vec<_>>(),
-                    &format,
-                    1_000_000.0,
-                    1_000_000.0,
-                )?;
-                let mut metrics = [DWRITE_LINE_METRICS::default()];
-                let mut count = 0;
-                layout.GetLineMetrics(Some(&mut metrics), &mut count)?;
-                self.text.insert(key.clone(), (layout, metrics[0].baseline));
-            }
+            let layout = create_text_layout(text, style, options)?;
+            let offset = text::line_metrics(&layout)?
+                .first()
+                .map_or(0.0, |m| m.baseline);
+            self.text.insert(key.clone(), (layout, offset));
         }
         let (layout, offset) = &self.text[&key];
         unsafe {
             self.solid.SetColor(&color(style.color));
             self.target.DrawTextLayout(
-                point(Point::new(baseline.x, baseline.y - offset)),
+                point(Point::new(
+                    position.x,
+                    position.y - if baseline { *offset } else { 0.0 },
+                )),
                 layout,
                 &self.solid,
                 D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
@@ -362,6 +364,17 @@ impl D2dRenderer {
 }
 impl Renderer for D2dRenderer {
     fn render(&mut self, scene: &Scene, viewport: Viewport) -> Result<(), Error> {
+        self.render_with(scene, viewport, |_| Ok(()))
+    }
+}
+impl D2dRenderer {
+    /// Draw native content after the display list, within the same BeginDraw/EndDraw.
+    pub fn render_with(
+        &mut self,
+        scene: &Scene,
+        viewport: Viewport,
+        draw: impl FnOnce(&NativeCanvas<'_>) -> Result<(), Error>,
+    ) -> Result<(), Error> {
         let mut transform = Transform::IDENTITY;
         let mut stack = Vec::new();
         let mut layers = 0usize;
@@ -427,7 +440,10 @@ impl Renderer for D2dRenderer {
                         text,
                         baseline,
                         style,
-                    } => self.text(text, *baseline, style)?,
+                    } => self.text(text, *baseline, style, TextOptions::default(), true)?,
+                    Command::TextLayout { layout, origin } => {
+                        self.text(&layout.text, *origin, &layout.style, layout.options, false)?
+                    }
                     Command::Image {
                         image,
                         destination,
@@ -435,7 +451,18 @@ impl Renderer for D2dRenderer {
                     } => self.image(image, *destination, *opacity)?,
                 }
             }
-            Ok(())
+            unsafe {
+                while layers > 0 {
+                    self.target.PopLayer();
+                    layers -= 1;
+                }
+                self.target.SetTransform(&Matrix3x2::identity());
+            }
+            draw(&NativeCanvas {
+                factory: &self.factory,
+                target: &self.target,
+                text_factory: &self.write,
+            })
         })();
         unsafe {
             while layers > 0 {
@@ -491,6 +518,16 @@ pub fn render_offscreen(
     height: u32,
     scale: f32,
 ) -> Result<Vec<u8>, Error> {
+    render_offscreen_with(scene, width, height, scale, |_| Ok(()))
+}
+/// Offscreen rendering with access to the same native drawing objects as a window.
+pub fn render_offscreen_with(
+    scene: &Scene,
+    width: u32,
+    height: u32,
+    scale: f32,
+    draw: impl FnOnce(&NativeCanvas<'_>) -> Result<(), Error>,
+) -> Result<Vec<u8>, Error> {
     if width == 0
         || height == 0
         || (width as u64) * (height as u64) > 16_777_216
@@ -521,9 +558,10 @@ pub fn render_offscreen(
                 ..Default::default()
             },
         )?;
-        D2dRenderer::new(factory, target)?.render(
+        D2dRenderer::new(factory, target)?.render_with(
             scene,
             Viewport::new(width as f32 / scale, height as f32 / scale, scale),
+            draw,
         )?;
         let mut bytes = vec![0u8; (width * height * 4) as usize];
         bitmap.CopyPixels(std::ptr::null(), width * 4, &mut bytes)?;
@@ -542,6 +580,8 @@ struct State<A: Application> {
     captured: Cell<bool>,
     high_surrogate: Cell<Option<u16>>,
     window_revision: Cell<u32>,
+    processing_native: Cell<bool>,
+    native_ready: Cell<bool>,
 }
 impl<A: Application> State<A> {
     fn event(&self, event: Event) {
@@ -550,6 +590,22 @@ impl<A: Application> State<A> {
         }
     }
     unsafe fn schedule(&self, hwnd: HWND) {
+        let _owner = services::enter(hwnd);
+        if self.native_ready.get() && !self.processing_native.replace(true) {
+            // Bound each batch so a result handler cannot starve the native event loop.
+            for _ in 0..64 {
+                let request = self
+                    .engine
+                    .try_borrow_mut()
+                    .ok()
+                    .and_then(|mut e| e.pop_native_request());
+                let Some((id, request)) = request else { break };
+                let result = native::execute(&request);
+                self.event(Event::NativeResult { id, result });
+            }
+            self.processing_native.set(false);
+        }
+
         let Ok(engine) = self.engine.try_borrow() else {
             return;
         };
@@ -603,7 +659,7 @@ impl<A: Application> State<A> {
         if engine.viewport() != viewport {
             engine.dispatch(Event::Resize(viewport));
         }
-        let scene = engine.frame(self.start.elapsed().as_secs_f64())?;
+        engine.frame(self.start.elapsed().as_secs_f64())?;
         let mut device = self.device.borrow_mut();
         if device.is_none() {
             let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
@@ -630,7 +686,8 @@ impl<A: Application> State<A> {
             target.Resize(&D2D_SIZE_U { width, height })?;
         }
         // Device removal is recoverable: release all target-bound resources and retry next paint.
-        match renderer.render(scene, viewport) {
+        let (app, scene) = engine.drawing_parts();
+        match renderer.render_with(scene, viewport, |native| app.native_draw(native, viewport)) {
             Ok(()) => Ok(()),
             Err(error) => {
                 let lost = renderer.lost;
@@ -660,6 +717,8 @@ pub fn run<A: Application + 'static>(app: A, options: WindowOptions) -> Result<(
         captured: Cell::new(false),
         high_surrogate: Cell::new(None),
         window_revision: Cell::new(0),
+        processing_native: Cell::new(false),
+        native_ready: Cell::new(false),
     });
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -707,6 +766,7 @@ pub fn run<A: Application + 'static>(app: A, options: WindowOptions) -> Result<(
             Some(instance.into()),
             Some((&*state as *const State<A>).cast()),
         )?;
+        state.native_ready.set(true);
         state.schedule(hwnd);
         let _ = ShowWindow(hwnd, SW_SHOW);
         let mut message = MSG::default();
@@ -773,6 +833,28 @@ unsafe fn window_message<A: Application>(
         return DefWindowProcW(hwnd, message, w, l);
     }
     let state = &*ptr;
+    let _owner = services::enter(hwnd);
+    if !matches!(message, WM_NCCREATE | WM_NCDESTROY | WM_DESTROY | WM_PAINT) {
+        let handled = state.engine.try_borrow_mut().ok().and_then(|mut engine| {
+            engine.app.native_event(WindowMessage {
+                hwnd,
+                message,
+                wparam: w,
+                lparam: l,
+            })
+        });
+        if let Some(result) = handled {
+            state.schedule(hwnd);
+            return result;
+        }
+    }
+    if message == WM_SETCURSOR && (l.0 as u16 as u32) == HTCLIENT {
+        if let Some(cursor) = services::cursor(hwnd) {
+            SetCursor(Some(cursor));
+            return LRESULT(1);
+        }
+    }
+
     let scale = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
     let position = Point::new(
         (l.0 as u16 as i16) as f32 / scale,
@@ -938,6 +1020,7 @@ unsafe fn window_message<A: Application>(
             return LRESULT(0);
         }
         WM_DESTROY => {
+            services::forget(hwnd);
             PostQuitMessage(0);
             return LRESULT(0);
         }

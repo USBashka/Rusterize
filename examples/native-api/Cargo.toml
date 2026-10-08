@@ -1,0 +1,15 @@
+[package]
+name = "rusterize-native-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "native-api"
+path = "src/main.rs"
+
+[dependencies]
+rusterize = { path = "../../crates/rusterize" }

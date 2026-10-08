@@ -8,6 +8,11 @@ extern "C" {
 /* All calls for one handle must be on its creating thread. Data/error pointers
  * remain valid until the next mutating call on that handle. Never free them. */
 uint64_t rusterize_create(void);
+/* Callback returns borrowed status-u32 + bytes, valid until its next invocation. */
+typedef const uint8_t *(*RusterizeNativeService)(const uint8_t *, size_t, size_t *);
+void rusterize_set_native_service(RusterizeNativeService callback);
+uint32_t rusterize_poll_native(uint64_t id);
+uint32_t rusterize_native_draw(uint64_t id, void *context, void *view, void *window);
 void rusterize_destroy(uint64_t id);
 uint32_t rusterize_status(uint64_t id);
 const char *rusterize_title(uint64_t id);

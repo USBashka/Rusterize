@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rusterize", "crates/rusterize-cli", "examples/gallery"]
+members = ["crates/rusterize", "crates/rusterize-cli", "examples/gallery", "examples/native-api"]
 resolver = "2"
 
 [workspace.package]

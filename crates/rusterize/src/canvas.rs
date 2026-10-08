@@ -14,6 +14,10 @@ pub enum Command {
         baseline: Point,
         style: TextStyle,
     },
+    TextLayout {
+        layout: TextLayout,
+        origin: Point,
+    },
     Image {
         image: Image,
         destination: Rect,
@@ -140,6 +144,16 @@ impl<'a> Canvas<'a> {
             style,
         });
     }
+    pub fn measure_text(&self, text: &str, style: &TextStyle) -> Result<TextMetrics, Error> {
+        crate::measure_text(text, style)
+    }
+    /// Draw the same native layout that supplied the metrics, at its top-left origin.
+    pub fn text_layout(&mut self, layout: &TextLayout, origin: impl Into<Point>) {
+        self.scene.commands.push(Command::TextLayout {
+            layout: layout.clone(),
+            origin: origin.into(),
+        });
+    }
     pub fn image(&mut self, image: &Image, destination: Rect, opacity: f32) {
         self.scene.commands.push(Command::Image {
             image: image.clone(),
@@ -189,10 +203,11 @@ impl<'a> Canvas<'a> {
                     style,
                 } => {
                     baseline.finite()
-                        && style.size.is_finite()
-                        && style.size > 0.0
+                        && style.valid()
+                        && text.len() <= 1024 * 1024
                         && !text.contains(['\n', '\r', '\0'])
                 }
+                Command::TextLayout { origin, .. } => origin.finite(),
                 Command::Image {
                     destination,
                     opacity,

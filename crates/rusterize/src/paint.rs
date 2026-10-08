@@ -69,6 +69,10 @@ pub struct TextStyle {
     pub color: Color,
     pub family: FontFamily,
     pub bold: bool,
+    pub font_name: Option<String>,
+    pub italic: bool,
+    pub underline: bool,
+    pub strikethrough: bool,
 }
 impl TextStyle {
     pub const fn new(size: f32, color: Color) -> Self {
@@ -77,6 +81,10 @@ impl TextStyle {
             color,
             family: FontFamily::Sans,
             bold: false,
+            font_name: None,
+            italic: false,
+            underline: false,
+            strikethrough: false,
         }
     }
     pub const fn bold(mut self) -> Self {
@@ -86,6 +94,31 @@ impl TextStyle {
     pub const fn family(mut self, family: FontFamily) -> Self {
         self.family = family;
         self
+    }
+    pub fn font(mut self, name: impl Into<String>) -> Self {
+        self.font_name = Some(name.into());
+        self
+    }
+    pub const fn italic(mut self) -> Self {
+        self.italic = true;
+        self
+    }
+    pub const fn underline(mut self) -> Self {
+        self.underline = true;
+        self
+    }
+    pub const fn strikethrough(mut self) -> Self {
+        self.strikethrough = true;
+        self
+    }
+    pub(crate) fn valid(&self) -> bool {
+        self.size.is_finite()
+            && self.size > 0.0
+            && self.size <= 16384.0
+            && self
+                .font_name
+                .as_ref()
+                .is_none_or(|s| !s.is_empty() && s.len() <= 1024 && !s.contains('\0'))
     }
 }
 

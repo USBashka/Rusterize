@@ -1,7 +1,7 @@
 import AppKit
 import CoreText
 
-enum WireError: Error { case malformed }
+enum WireError: Error { case malformed, native(String) }
 struct Reader {
     let data: Data
     var offset = 0
@@ -19,6 +19,7 @@ struct Reader {
     mutating func f() throws -> CGFloat { CGFloat(Float(bitPattern: try u32())) }
     mutating func point() throws -> CGPoint { let x = try f(); return CGPoint(x: x, y: try f()) }
     mutating func rect() throws -> CGRect { let x = try f(), y = try f(), w = try f(), h = try f(); return CGRect(x:x,y:y,width:w,height:h) }
+    mutating func string() throws -> String { let count = try u32(); guard let text = String(data:try take(Int(count)),encoding:.utf8) else { throw WireError.malformed };return text }
     mutating func color() throws -> CGColor {
         let bytes = try take(4)
         return CGColor(colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!, components: bytes.map { CGFloat($0)/255 })!
@@ -73,27 +74,129 @@ enum Brush {
     }
 }
 
+
+struct Writer {
+    var data = Data()
+    mutating func u32(_ value:UInt32) {var value=value.littleEndian;withUnsafeBytes(of:&value){data.append(contentsOf:$0)}}
+    mutating func f(_ value:CGFloat) {u32(Float(value).bitPattern)}
+    mutating func string(_ text:String) {let bytes=Data(text.utf8);u32(UInt32(bytes.count));data.append(bytes)}
+}
+struct NativeLine {let start:Int;var end:Int;let top:CGFloat;let height:CGFloat;let baseline:CGFloat}
+final class NativeText {
+    let text:String
+    let storage:NSTextStorage
+    let manager=NSLayoutManager()
+    let container:NSTextContainer
+    var lines:[NativeLine]=[]
+    let used:CGRect
+    let offsetX:CGFloat
+    init(_ r:inout Reader) throws {
+        let size=try r.f(),color=try r.color(),family=try r.u32(),flags=try r.u32(),name=try r.string(),width=try r.f(),wrap=try r.u32(),align=try r.u32(),direction=try r.u32()
+        text=try r.string()
+        let fallback=family==0 ? NSFont.systemFont(ofSize:size) : NSFont(name:family==1 ? "Georgia":"Menlo",size:size) ?? NSFont.systemFont(ofSize:size)
+        var font=name.isEmpty ? fallback : NSFont(name:name,size:size) ?? fallback
+        if flags&1 != 0 {font=NSFontManager.shared.convert(font,toHaveTrait:.boldFontMask)}
+        if flags&2 != 0 {font=NSFontManager.shared.convert(font,toHaveTrait:.italicFontMask)}
+        let paragraph=NSMutableParagraphStyle();paragraph.alignment=align==1 ? .center:align==2 ? .right:.left
+        paragraph.baseWritingDirection=direction==1 ? .rightToLeft:.leftToRight
+        paragraph.lineBreakMode=wrap==0 ? .byClipping:wrap==2 ? .byCharWrapping:.byWordWrapping
+        var attributes:[NSAttributedString.Key:Any]=[.font:font,.foregroundColor:NSColor(cgColor:color) ?? NSColor.textColor,.paragraphStyle:paragraph]
+        if flags&4 != 0 {attributes[.underlineStyle]=NSUnderlineStyle.single.rawValue};if flags&8 != 0 {attributes[.strikethroughStyle]=NSUnderlineStyle.single.rawValue}
+        storage=NSTextStorage(string:text,attributes:attributes)
+        let actualWidth=wrap==0 ? max(width,ceil(storage.size().width)):width
+        offsetX=(width-actualWidth)*(align==1 ? 0.5:align==2 ? 1:0)
+        container=NSTextContainer(size:NSSize(width:actualWidth,height:CGFloat.greatestFiniteMagnitude));container.lineFragmentPadding=0
+        storage.addLayoutManager(manager);manager.addTextContainer(container);manager.ensureLayout(for:container)
+        let glyphs=manager.glyphRange(for:container);used=manager.usedRect(for:container)
+        var utf8Offsets=[Int](repeating:0,count:text.utf16.count+1),unit=0,byte=0
+        for scalar in text.unicodeScalars {let units=scalar.value>0xffff ? 2:1;for j in 0..<units {utf8Offsets[unit+j]=byte};unit+=units;byte+=scalar.value<0x80 ? 1:scalar.value<0x800 ? 2:scalar.value<0x10000 ? 3:4;utf8Offsets[unit]=byte}
+        manager.enumerateLineFragments(forGlyphRange:glyphs){[self] rect,_,_,range,_ in
+            let chars=manager.characterRange(forGlyphRange:range,actualGlyphRange:nil)
+            let start=utf8Offsets[chars.location]
+            let baseline=rect.minY+manager.location(forGlyphAt:range.location).y
+            lines.append(NativeLine(start:start,end:0,top:rect.minY,height:rect.height,baseline:baseline))
+        }
+        if manager.extraLineFragmentTextContainer != nil || lines.isEmpty {
+            let rect=manager.extraLineFragmentRect
+            let height=rect.height>0 ? rect.height:manager.defaultLineHeight(for:font)
+            lines.append(NativeLine(start:text.utf8.count,end:0,top:rect.minY,height:height,baseline:rect.minY+font.ascender))
+        }
+        for i in lines.indices {lines[i].end=i+1<lines.count ? lines[i+1].start:text.utf8.count}
+    }
+    func metrics()->Data {
+        var out=Writer();out.f(used.width);out.f(used.width);out.f(max(used.height,lines.last.map{$0.top+$0.height} ?? 0));out.f(lines[0].baseline);out.u32(UInt32(lines.count))
+        for line in lines {out.u32(UInt32(line.start));out.u32(UInt32(line.end));out.f(line.top);out.f(line.height);out.f(line.baseline)}
+        return out.data
+    }
+    func draw(_ context:CGContext,at position:CGPoint) {
+        NSGraphicsContext.saveGraphicsState();defer {NSGraphicsContext.restoreGraphicsState()}
+        NSGraphicsContext.current=NSGraphicsContext(cgContext:context,flipped:true)
+        let range=manager.glyphRange(for:container),origin=CGPoint(x:position.x+offsetX,y:position.y);manager.drawBackground(forGlyphRange:range,at:origin);manager.drawGlyphs(forGlyphRange:range,at:origin)
+    }
+}
+weak var nativeView:RusterizeView?
+var nativeResponse:UnsafeMutablePointer<UInt8>?
+func nativeService(_ data:UnsafePointer<UInt8>?,_ count:Int,_ length:UnsafeMutablePointer<Int>?)->UnsafePointer<UInt8>? {
+    var out=Writer();out.u32(0)
+    do {
+        guard let data=data else {throw WireError.malformed}
+        var r=Reader(data:Data(bytes:data,count:count));let op=try r.u32()
+        if op==1 {out.data.append(try NativeText(&r).metrics())}
+        else if op==2 {out.u32(1023)}
+        else {
+            guard let view=nativeView,let window=view.window else {throw WireError.native("No active native window")}
+            switch op {
+            case 3: out.data.append(Data((NSPasteboard.general.string(forType:.string) ?? "").utf8))
+            case 4: let text=try r.string();NSPasteboard.general.clearContents();if !NSPasteboard.general.setString(text,forType:.string){throw WireError.native("Clipboard write failed")}
+            case 5:
+                let cursors:[NSCursor]=[.arrow,.iBeam,.pointingHand,.crosshair,.openHand,.resizeLeftRight,.resizeUpDown,NSCursor(image:NSImage(size:NSSize(width:1,height:1)),hotSpot:.zero)]
+                let index=Int(try r.u32());guard index<cursors.count else {throw WireError.malformed};view.serviceCursor=cursors[index];window.invalidateCursorRects(for:view);view.serviceCursor.set()
+            case 6:
+                let state=try r.u32(),fullscreen=window.styleMask.contains(.fullScreen)
+                if (state==3) != fullscreen {window.toggleFullScreen(nil)}
+                if state==0 {window.deminiaturize(nil);if window.isZoomed {window.zoom(nil)}}
+                else if state==1 {window.miniaturize(nil)}
+                else if state==2 && !window.isZoomed {window.zoom(nil)}
+            case 7: let w=try r.f(),h=try r.f();window.setContentSize(NSSize(width:w,height:h))
+            case 8: let x=try r.f(),y=try r.f();let top=NSScreen.screens.first?.frame.maxY ?? 0;window.setFrameTopLeftPoint(NSPoint(x:x,y:top-y))
+            case 9: window.level=try r.u32() != 0 ? .floating:.normal
+            case 10:
+                let save=try r.u32() != 0,directory=try r.u32() != 0,title=try r.string(),name=try r.string()
+                let panel:NSSavePanel
+                if save {panel=NSSavePanel()} else {let open=NSOpenPanel();open.canChooseDirectories=directory;open.canChooseFiles = !directory;open.allowsMultipleSelection=false;panel=open}
+                panel.title=title;panel.nameFieldStringValue=name
+                if panel.runModal() == .OK,let url=panel.url {out.u32(1);out.string(url.path)}else {out.u32(0)}
+            case 11: let alert=NSAlert();alert.messageText=try r.string();alert.informativeText=try r.string();alert.runModal()
+            case 12: guard let url=URL(string:try r.string()),NSWorkspace.shared.open(url) else {throw WireError.native("Cannot open URI")}
+            default: throw WireError.native("Unsupported native operation")
+            }
+        }
+    } catch {out=Writer();out.u32(1);out.data.append(Data(String(describing:error).utf8))}
+    nativeResponse?.deallocate();let pointer=UnsafeMutablePointer<UInt8>.allocate(capacity:out.data.count);out.data.copyBytes(to:pointer,count:out.data.count);nativeResponse=pointer;length?.pointee=out.data.count;return UnsafePointer(pointer)
+}
+
 final class RusterizeView: NSView {
     private var handle = rusterize_create()
     private let origin = ProcessInfo.processInfo.systemUptime
     private var timer: Timer?
     private var images: [UInt64: CGImage] = [:]
-    private var textCache: [String: CTLine] = [:]
     private var tracking: NSTrackingArea?
     private var windowRevision:UInt32 = 0
     var initialSize:NSSize {NSSize(width:CGFloat(Float(bitPattern:rusterize_window_option(handle,0))),height:CGFloat(Float(bitPattern:rusterize_window_option(handle,1))))}
     var minimumSize:NSSize {NSSize(width:CGFloat(Float(bitPattern:rusterize_window_option(handle,2))),height:CGFloat(Float(bitPattern:rusterize_window_option(handle,3))))}
     var resizable:Bool {rusterize_window_option(handle,7) != 0}
+    var serviceCursor: NSCursor = .arrow
+    override func resetCursorRects() {addCursorRect(bounds,cursor:serviceCursor)}
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
-    override init(frame: NSRect) { super.init(frame:frame); wantsLayer = false }
+    override init(frame: NSRect) { super.init(frame:frame); wantsLayer = false; nativeView = self }
     required init?(coder: NSCoder) { fatalError("Use init(frame:)") }
     deinit { timer?.invalidate(); rusterize_destroy(handle) }
     func event(_ kind: UInt32, _ x: CGFloat = 0, _ y: CGFloat = 0, _ dx: CGFloat = 0, _ dy: CGFloat = 0, _ detail: UInt32 = 0, _ flags: UInt32 = 0) {
         _ = rusterize_event(handle,kind,Float(x),Float(y),Float(dx),Float(dy),detail,flags); schedule()
     }
     private func schedule() {
-        let status = rusterize_status(handle)
+        let status = rusterize_poll_native(handle)
         if status & 0x80000000 != 0 { fail(String(cString:rusterize_error(handle))); return }
         if status & 4 != 0 { window?.close(); return }
         updateChrome()
@@ -140,14 +243,15 @@ final class RusterizeView: NSView {
     }
     private func replay(_ context:CGContext,_ data:Data) throws {
         var r = Reader(data:data)
-        guard try r.u32() == 0x31305a52 else { throw WireError.malformed }
+        guard try r.u32() == 0x32305a52 else { throw WireError.malformed }
         let commands = try r.u32()
         var depth = 0, used = Set<UInt64>()
         context.saveGState()
         defer { for _ in 0..<depth { context.restoreGState() }; context.restoreGState() }
         context.clear(bounds); context.setLineCap(.butt);context.setLineJoin(.miter);context.setMiterLimit(10)
         for _ in 0..<commands {
-            switch try r.u32() {
+            let opcode = try r.u32()
+            switch opcode {
             case 1:
                 let color = try r.color(); context.saveGState();context.setBlendMode(.copy);context.setFillColor(color);context.fill(bounds);context.restoreGState()
             case 2: context.saveGState(); depth += 1
@@ -158,21 +262,9 @@ final class RusterizeView: NSView {
             case 5: context.addPath(try r.shape());context.clip(using:.winding)
             case 6: let path = try r.shape(),brush = try Brush.read(&r);brush.draw(context,path:path,width:nil)
             case 7: let path = try r.shape(),brush = try Brush.read(&r),width = try r.f();brush.draw(context,path:path,width:width)
-            case 8:
-                let point = try r.point(),size = try r.f(),color = try r.color(),family = try r.u32(),bold = try r.u32(),length = try r.u32()
-                guard family < 3, let string = String(data:try r.take(Int(length)),encoding:.utf8) else {throw WireError.malformed}
-                let cacheKey = "\(family):\(bold):\(size):\(string)"
-                var line = textCache[cacheKey]
-                if line == nil {
-                    let fontName = family == 0 ? ".AppleSystemUIFont" : family == 1 ? "Georgia" : "Menlo"
-                    var font = CTFontCreateWithName(fontName as CFString,size,nil)
-                    if bold != 0, let heavy = CTFontCreateCopyWithSymbolicTraits(font,size,nil,.boldTrait,.boldTrait) { font = heavy }
-                    let attributes: [NSAttributedString.Key: Any] = [NSAttributedString.Key(kCTFontAttributeName as String):font,NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String):true]
-                    line = CTLineCreateWithAttributedString(NSAttributedString(string:string,attributes:attributes))
-                    if textCache.count >= 256 {textCache.removeAll(keepingCapacity:true)}
-                    textCache[cacheKey] = line
-                }
-                context.saveGState();context.translateBy(x:point.x,y:point.y);context.scaleBy(x:1,y:-1);context.textMatrix = .identity;context.textPosition = .zero;context.setFillColor(color);CTLineDraw(line!,context);context.restoreGState()
+            case 8,10:
+                let position = try r.point(), text = try NativeText(&r)
+                text.draw(context,at:CGPoint(x:position.x,y:position.y-(opcode == 8 ? text.lines[0].baseline : 0)))
             case 9:
                 let id = try r.u64(),w = try r.u32(),h = try r.u32(),destination = try r.rect(),opacity = try r.f(),length = try r.u32()
                 guard w > 0,h > 0,UInt64(w)*UInt64(h)*4 == UInt64(length) else {throw WireError.malformed}
@@ -190,6 +282,12 @@ final class RusterizeView: NSView {
         }
         guard depth == 0,r.offset == data.count else {throw WireError.malformed}
         images = images.filter { used.contains($0.key) }
+        context.restoreGState();context.saveGState()
+        context.saveGState();defer {context.restoreGState()}
+        let contextPointer=Unmanaged.passUnretained(context).toOpaque(),viewPointer=Unmanaged.passUnretained(self).toOpaque()
+        let windowPointer=window.map{Unmanaged.passUnretained($0).toOpaque()}
+        if rusterize_native_draw(handle,contextPointer,viewPointer,windowPointer) & 0x80000000 != 0 {throw WireError.native("Native draw failed")}
+
     }
     override func updateTrackingAreas() {
         super.updateTrackingAreas();if let old = tracking {removeTrackingArea(old)}
@@ -237,6 +335,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
     func applicationDidHide(_ n:Notification){view.event(10)}
     func applicationDidUnhide(_ n:Notification){view.event(11)}
 }
+rusterize_set_native_service(nativeService)
 let application = NSApplication.shared
 if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--snapshot" {
     do {try RusterizeView(frame:NSRect(x:0,y:0,width:960,height:680)).snapshot(to:CommandLine.arguments[2]);exit(0)}

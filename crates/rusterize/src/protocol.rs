@@ -2,13 +2,13 @@
 //! See `docs/protocol.md`. This is an in-process trusted transport, not a file parser.
 use crate::*;
 
-pub const MAGIC: &[u8; 4] = b"RZ01";
+pub const MAGIC: &[u8; 4] = b"RZ02";
 
 /// Encode a complete frame, reusing the destination allocation.
 pub fn encode(scene: &Scene, output: &mut Vec<u8>) {
     output.clear();
     output.extend_from_slice(MAGIC);
-    let mut w = Writer(output);
+    let mut w = Writer(std::mem::take(output));
     w.u32(scene.commands().len() as u32);
     for command in scene.commands() {
         match command {
@@ -46,15 +46,12 @@ pub fn encode(scene: &Scene, output: &mut Vec<u8>) {
             } => {
                 w.u32(8);
                 w.point(*baseline);
-                w.f32(style.size);
-                w.color(style.color);
-                w.u32(match style.family {
-                    FontFamily::Sans => 0,
-                    FontFamily::Serif => 1,
-                    FontFamily::Monospace => 2,
-                });
-                w.u32(u32::from(style.bold));
-                w.bytes(text.as_bytes());
+                w.text(text, style, TextOptions::default());
+            }
+            Command::TextLayout { layout, origin } => {
+                w.u32(10);
+                w.point(*origin);
+                w.text(&layout.text, &layout.style, layout.options);
             }
             Command::Image {
                 image,
@@ -71,19 +68,37 @@ pub fn encode(scene: &Scene, output: &mut Vec<u8>) {
             }
         }
     }
+    *output = w.0;
 }
-struct Writer<'a>(&'a mut Vec<u8>);
-impl Writer<'_> {
-    fn u32(&mut self, v: u32) {
+pub(crate) struct Writer(pub Vec<u8>);
+impl Writer {
+    pub(crate) fn text(&mut self, text: &str, style: &TextStyle, options: TextOptions) {
+        self.f32(style.size);
+        self.color(style.color);
+        self.u32(style.family as u32);
+        self.u32(
+            u32::from(style.bold)
+                | (u32::from(style.italic) << 1)
+                | (u32::from(style.underline) << 2)
+                | (u32::from(style.strikethrough) << 3),
+        );
+        self.bytes(style.font_name.as_deref().unwrap_or("").as_bytes());
+        self.f32(options.width);
+        self.u32(options.wrap as u32);
+        self.u32(options.align as u32);
+        self.u32(options.direction as u32);
+        self.bytes(text.as_bytes());
+    }
+    pub(crate) fn u32(&mut self, v: u32) {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
-    fn f32(&mut self, v: f32) {
+    pub(crate) fn f32(&mut self, v: f32) {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
     fn color(&mut self, c: Color) {
         self.0.extend_from_slice(&[c.r, c.g, c.b, c.a]);
     }
-    fn point(&mut self, p: Point) {
+    pub(crate) fn point(&mut self, p: Point) {
         self.f32(p.x);
         self.f32(p.y);
     }
@@ -92,7 +107,7 @@ impl Writer<'_> {
             self.f32(v);
         }
     }
-    fn bytes(&mut self, b: &[u8]) {
+    pub(crate) fn bytes(&mut self, b: &[u8]) {
         self.u32(b.len() as u32);
         self.0.extend_from_slice(b);
     }
@@ -170,7 +185,7 @@ mod tests {
         c.finish().unwrap();
         let mut b = Vec::with_capacity(256);
         encode(&scene, &mut b);
-        let mut expected = b"RZ01\x02\0\0\0\x01\0\0\0\x01\x02\x03\x04\x06\0\0\0\0\0\0\0".to_vec();
+        let mut expected = b"RZ02\x02\0\0\0\x01\0\0\0\x01\x02\x03\x04\x06\0\0\0\0\0\0\0".to_vec();
         for n in [0.0f32, 0.0, 1.0, 2.0] {
             expected.extend_from_slice(&n.to_le_bytes());
         }

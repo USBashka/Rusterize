@@ -82,6 +82,10 @@ const FILES: &[(&str, &str)] = &[
     ("SKILL.md", include_str!("../../../SKILL.md")),
     ("docs/API.md", include_str!("../../../docs/API.md")),
     (
+        "docs/NATIVE_API.md",
+        include_str!("../../../docs/NATIVE_API.md"),
+    ),
+    (
         "docs/ARCHITECTURE.md",
         include_str!("../../../docs/ARCHITECTURE.md"),
     ),
