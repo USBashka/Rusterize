@@ -59,6 +59,18 @@ jobs:
       - name: Encode Windows snapshot
         if: runner.os == 'Windows'
         run: python scripts/bgra_to_png.py dist/gallery.bgra dist/gallery-windows.png
+      - name: Verify executable permissions after unpacking
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p target/package-check
+          tar -xzf dist/rusterize-gallery-${{ matrix.platform }}.tar.gz -C target/package-check
+          if [[ '${{ matrix.platform }}' == 'linux' ]]; then
+            target/package-check/rusterize-gallery --snapshot target/package-check.png
+          else
+            codesign --verify --deep target/package-check/rusterize-gallery.app
+            target/package-check/rusterize-gallery.app/Contents/MacOS/rusterize-gallery --snapshot target/package-check.png
+          fi
       - name: Generate a fresh application
         run: cargo run -p rusterize-cli -- new target/ci-app
       - name: Check generated app

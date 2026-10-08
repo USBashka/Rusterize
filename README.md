@@ -44,6 +44,8 @@ python3 scripts/build.py --platform macos
 
 Android APK подписывается локальным **отладочным** ключом для установки и проверки. Для магазина нужны собственная подпись, идентификатор и процесс выпуска. Сборщик не устанавливает APK автоматически. Можно добавить `--abi x86_64` для эмулятора или две опции `--abi` для двух архитектур. Оболочка не запрашивает интернет, хранилище или другие разрешения.
 
+Готовые сборки находятся в разделе Artifacts [успешного запуска CI](https://github.com/USBashka/Rusterize/actions/workflows/ci.yml). Для Linux/macOS используй вложенный `.tar.gz`: он сохраняет права запуска. Распаковать: `tar -xzf rusterize-gallery-linux.tar.gz` или `tar -xzf rusterize-gallery-macos.tar.gz`. macOS-приложение имеет локальную ad hoc подпись, без notarization Apple.
+
 ## Создать приложение
 
 ```sh

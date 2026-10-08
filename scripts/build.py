@@ -11,6 +11,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -165,6 +166,11 @@ def main():
         run(['codesign','--force','--sign','-',artifact],env=env)
     size = artifact.stat().st_size if artifact.is_file() else sum(p.stat().st_size for p in artifact.rglob('*') if p.is_file())
     print(f'Built {artifact} ({size:,} bytes)',flush=True)
+    if args.platform in ('linux','macos'):
+        archive = output/(name+'-'+args.platform+'.tar.gz')
+        with tarfile.open(archive,'w:gz') as package_archive:
+            package_archive.add(artifact,arcname=artifact.name)
+        print(f'Packaged {archive} ({archive.stat().st_size:,} bytes)',flush=True)
 
 if __name__=='__main__':
     try:
