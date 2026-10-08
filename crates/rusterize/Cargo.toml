@@ -1,0 +1,29 @@
+[package]
+name = "rusterize"
+description = "Small native-canvas applications with shared Rust drawing and input"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["native"]
+native = ["dep:windows", "dep:windows-numerics"]
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", optional = true, features = [
+    "Win32_Foundation", "Win32_Graphics_Direct2D", "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectWrite", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging", "Win32_Graphics_Dwm", "Win32_System_Com", "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Threading", "Win32_System_SystemServices"
+] }
+windows-numerics = { version = "0.3.1", optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21.1"
+
+[[bench]]
+name = "scene"
+harness = false

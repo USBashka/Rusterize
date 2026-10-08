@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: Native (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+          - os: ubuntu-24.04
+            platform: linux
+          - os: macos-14
+            platform: macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Linux system libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libpango1.0-dev pkg-config
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - run: cargo test -p rusterize --no-default-features --locked
+      - run: cargo doc --workspace --no-deps --locked
+      - name: Package native app
+        run: python scripts/build.py --platform ${{ matrix.platform }}
+      - name: Linux native snapshot
+        if: runner.os == 'Linux'
+        run: dist/rusterize-gallery --snapshot dist/gallery-linux.png
+      - name: macOS native snapshot
+        if: runner.os == 'macOS'
+        run: dist/rusterize-gallery.app/Contents/MacOS/rusterize-gallery --snapshot dist/gallery-macos.png
+      - name: Windows native snapshot
+        if: runner.os == 'Windows'
+        run: cargo run -p rusterize-gallery --example snapshot -- dist/gallery.bgra
+      - name: Encode Windows snapshot
+        if: runner.os == 'Windows'
+        run: python scripts/bgra_to_png.py dist/gallery.bgra dist/gallery-windows.png
+      - name: Generate a fresh application
+        run: cargo run -p rusterize-cli -- new target/ci-app
+      - name: Check generated app
+        run: cargo check --manifest-path target/ci-app/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rusterize-${{ matrix.platform }}
+          path: dist/
+          if-no-files-found: error
+
+  android:
+    name: Android (ARM64 and x86-64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Android SDK
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'ndk;27.2.12479018'
+      - name: Build and verify APK
+        run: python3 scripts/build.py --platform android --ndk "$ANDROID_HOME/ndk/27.2.12479018" --abi arm64-v8a --abi x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rusterize-android
+          path: dist/*.apk
+          if-no-files-found: error
+
+  core-msrv:
+    name: Core (Rust 1.85)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - run: cargo test -p rusterize --no-default-features --locked

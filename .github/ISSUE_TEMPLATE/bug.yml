@@ -1,0 +1,35 @@
+name: Ошибка
+description: Сбой, некорректное рисование или различие поведения между платформами
+labels: [bug]
+body:
+  - type: input
+    id: platform
+    attributes:
+      label: ОС и устройство
+      placeholder: Windows 11, Android 15 / ARM64, Ubuntu 24.04, macOS 14…
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Версия Rusterize и Rust
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Как воспроизвести
+      description: Минимальный пример кода, команда сборки и последовательность действий.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Ожидаемый и фактический результат
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Диагностика
+      description: Сообщение об ошибке, снимок приложения или вывод сборки. Удалите личные данные и токены.

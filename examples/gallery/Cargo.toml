@@ -1,0 +1,17 @@
+[package]
+name = "rusterize-gallery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "rusterize_gallery"
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[dependencies]
+rusterize = { path = "../../crates/rusterize" }
+
+[[bin]]
+name = "gallery"
+path = "src/main.rs"

@@ -1,0 +1,10 @@
+/target/
+/dist/
+/.tools/
+**/.gradle/
+**/build/
+**/local.properties
+**/jniLibs/
+*.keystore
+__pycache__/
+.DS_Store

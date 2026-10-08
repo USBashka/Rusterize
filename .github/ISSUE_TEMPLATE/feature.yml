@@ -1,0 +1,19 @@
+name: Возможность
+description: Предложить расширение Canvas API или платформенной интеграции
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Какую задачу это решает
+    validations:
+      required: true
+  - type: textarea
+    id: api
+    attributes:
+      label: Предлагаемый API и пример использования
+  - type: textarea
+    id: platforms
+    attributes:
+      label: Поддержка платформ
+      description: На каких ОС это нужно и какой нативный API можно использовать?
