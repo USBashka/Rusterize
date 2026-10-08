@@ -10,6 +10,10 @@ repository.workspace = true
 [features]
 default = ["native"]
 native = ["dep:windows", "dep:windows-numerics"]
+shaders = ["dep:glow", "dep:windows", "windows/Win32_Graphics_OpenGL"]
+
+[dependencies]
+glow = { version = "0.16", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", optional = true, features = [

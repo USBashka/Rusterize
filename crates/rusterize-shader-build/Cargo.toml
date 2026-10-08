@@ -1,0 +1,10 @@
+[package]
+name = "rusterize-shader-build"
+description = "Build-time WGSL compiler for Rusterize element shaders"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+naga = { version = "24", default-features = false, features = ["wgsl-in", "glsl-out"] }

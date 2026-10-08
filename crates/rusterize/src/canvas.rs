@@ -161,7 +161,7 @@ impl<'a> Canvas<'a> {
             opacity,
         });
     }
-    fn fail(&mut self, message: &str) {
+    pub(crate) fn fail(&mut self, message: &str) {
         if self.error.is_none() {
             self.error = Some(Error(message.into()));
         }

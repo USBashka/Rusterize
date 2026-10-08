@@ -75,7 +75,7 @@ def build_android(args, package, library, target_dir, output, env):
         build_env = env.copy()
         build_env['CARGO_TARGET_'+target.upper().replace('-','_')+'_LINKER'] = str(clang)
         build_env['RUSTFLAGS'] = f'-C link-arg=--target={triple}26 -C link-arg=-Wl,-z,max-page-size=16384'
-        run(['cargo','build','--release','--lib','-p',package['name'],'--target',target],env=build_env)
+        run(['cargo','build','--release','--lib','-p',package['name'],'--target',target,*(['--features',args.features] if args.features else [])],env=build_env)
         native.append((abi,target_dir/target/'release'/('lib'+library+'.so')))
     java = java_home()
     tools = latest(sdk/'build-tools','*')
@@ -116,7 +116,9 @@ def main():
     parser.add_argument('--ndk')
     parser.add_argument('--abi',action='append',choices=['arm64-v8a','x86_64'])
     parser.add_argument('--app-id')
+    parser.add_argument('--features',help='Comma-separated Cargo features for the application package')
     args = parser.parse_args()
+    feature_args = ['--features',args.features] if args.features else []
     env = os.environ.copy()
     # Keep Rust/LTO temporary archives on the same writable filesystem.
     temporary = ROOT/'target/rusterize-tmp'
@@ -141,26 +143,28 @@ def main():
         if os.name!='nt' or not binary:
             raise RuntimeError('Windows builds need Windows/MSVC and an application binary target')
         env['RUSTFLAGS'] = (env.get('RUSTFLAGS','')+' -C target-feature=+crt-static').strip()
-        run(['cargo','build','--release','-p',name,'--bin',binary],env=env)
+        run(['cargo','build','--release','-p',name,'--bin',binary,*feature_args],env=env)
         artifact = output/(binary+'.exe')
         shutil.copy2(target_dir/'release'/(binary+'.exe'),artifact)
     elif args.platform=='linux':
         if sys.platform!='linux' or not library:
             raise RuntimeError('Linux builds need Linux, a staticlib target and libgtk-4-dev')
-        run(['cargo','build','--release','--lib','-p',name],env=env)
+        run(['cargo','build','--release','--lib','-p',name,*feature_args],env=env)
+        shaders = 'rusterize feature "shaders"' in run(['cargo','tree','-p',name,'-e','features',*feature_args],env=env,capture=True)
         flags = shlex.split(run(['pkg-config','--cflags','--libs','gtk4','pangocairo'],capture=True))
         artifact = output/name
-        run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',ROOT/'hosts/linux/main.c',target_dir/'release'/('lib'+library+'.a'),*flags,'-ldl','-lpthread','-lm','-lrt','-lutil','-o',artifact],env=env)
+        run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',ROOT/'hosts/linux/main.c',target_dir/'release'/('lib'+library+'.a'),*flags,*(['-lEGL'] if shaders else []),'-ldl','-lpthread','-lm','-lrt','-lutil','-o',artifact],env=env)
         run(['strip',artifact],env=env)
     else:
         if sys.platform!='darwin' or not library:
             raise RuntimeError('macOS builds need macOS/Xcode and a staticlib target')
         env['MACOSX_DEPLOYMENT_TARGET'] = '11.0'
-        run(['cargo','build','--release','--lib','-p',name],env=env)
+        run(['cargo','build','--release','--lib','-p',name,*feature_args],env=env)
+        shaders = 'rusterize feature "shaders"' in run(['cargo','tree','-p',name,'-e','features',*feature_args],env=env,capture=True)
         artifact = output/(name+'.app')
         executable = artifact/'Contents/MacOS'/name
         executable.parent.mkdir(parents=True,exist_ok=True)
-        run(['swiftc','-Osize','-target',platform.machine()+'-apple-macosx11.0','-import-objc-header',ROOT/'hosts/rusterize.h',ROOT/'hosts/macos/main.swift',target_dir/'release'/('lib'+library+'.a'),'-framework','AppKit','-framework','CoreGraphics','-framework','CoreText','-o',executable],env=env)
+        run(['swiftc','-Osize','-target',platform.machine()+'-apple-macosx11.0','-import-objc-header',ROOT/'hosts/rusterize.h',ROOT/'hosts/macos/main.swift',target_dir/'release'/('lib'+library+'.a'),'-framework','AppKit','-framework','CoreGraphics','-framework','CoreText',*(['-framework','OpenGL'] if shaders else []),'-o',executable],env=env)
         with (artifact/'Contents/Info.plist').open('wb') as file:
             plistlib.dump({'CFBundleExecutable':name,'CFBundleName':name,'CFBundleIdentifier':args.app_id or 'dev.rusterize.app','CFBundlePackageType':'APPL','NSHighResolutionCapable':True,'LSMinimumSystemVersion':'11.0'},file)
         run(['codesign','--force','--sign','-',artifact],env=env)

@@ -20,6 +20,8 @@ pub mod host;
 pub mod native;
 mod paint;
 pub mod protocol;
+#[cfg(feature = "shaders")]
+pub mod shader;
 mod text;
 
 pub use app::*;

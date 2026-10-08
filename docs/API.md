@@ -69,4 +69,6 @@ canvas.with_save(|c| {
 
 `Renderer::render(&Scene, Viewport)` — интерфейс нового Rust-адаптера. `windows::D2dRenderer::new(factory,target)` позволяет использовать готовый Direct2D target. `windows::render_offscreen` возвращает premultiplied BGRA8 и используется для тестов без окна.
 
+Feature `shaders` добавляет `shader::{ShaderSource, ShaderParams, ShaderRenderer}` и `Canvas::shader`. WGSL переводится Naga при сборке приложения; результат исполняется системным OpenGL и становится обычным Image в display list. Подключение, текстурный вход, кэш и ограничения readback описаны в [SHADERS.md](SHADERS.md).
+
 `export_app!` создаёт C ABI и, на Android, JNI. Внешние оболочки получают проверенный display list через бинарный [протокол](protocol.md). Ошибка кадра очищает его целиком; host переходит в состояние FAILED. Release-профиль abort завершает процесс при panic приложения — это не механизм восстановления ошибок.

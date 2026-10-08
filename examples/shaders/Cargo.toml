@@ -1,0 +1,21 @@
+[package]
+name = "rusterize-shaders"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+self-check = []
+
+[lib]
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "shaders"
+path = "src/main.rs"
+
+[dependencies]
+rusterize = { path = "../../crates/rusterize", features = ["shaders"] }
+
+[build-dependencies]
+rusterize-shader-build = { path = "../../crates/rusterize-shader-build" }
