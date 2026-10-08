@@ -71,7 +71,7 @@ static void text_metrics(NativeText *t,GByteArray *out) {
     for(int i=0;i<count;i++) {
         PangoLayoutLine *line=pango_layout_iter_get_line_readonly(iter);int start=line->start_index,top,bottom,baseline=pango_layout_iter_get_baseline(iter);
         pango_layout_iter_get_line_yrange(iter,&top,&bottom);gboolean has_next=pango_layout_iter_next_line(iter);PangoLayoutLine *next=has_next?pango_layout_iter_get_line_readonly(iter):NULL;
-        put_u32(out,start);put_u32(out,next?next->start_index:strlen(t->text));put_f32(out,(float)top/PANGO_SCALE);put_f32(out,(float)(bottom-top)/PANGO_SCALE);put_f32(out,(float)baseline/PANGO_SCALE);
+        put_u32(out,start);put_u32(out,next?(uint32_t)next->start_index:(uint32_t)strlen(t->text));put_f32(out,(float)top/PANGO_SCALE);put_f32(out,(float)(bottom-top)/PANGO_SCALE);put_f32(out,(float)baseline/PANGO_SCALE);
     }
     pango_layout_iter_free(iter);
 }
