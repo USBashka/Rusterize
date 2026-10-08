@@ -15,6 +15,10 @@
 
 Это первая версия 0.1. Статус реальных проверок, размеры файлов и ограничения перечислены в [VALIDATION.md](docs/VALIDATION.md). Наличие адаптера не означает, что он проверен на всех устройствах.
 
+| Windows: нативный Direct2D-кадр | Android: работающий пример в эмуляторе |
+| --- | --- |
+| <img src="docs/images/gallery-windows.png" width="640" alt="Галерея Rusterize на Direct2D"> | <img src="docs/images/gallery-android.png" width="220" alt="Галерея Rusterize в Android"> |
+
 ## Запустить пример
 
 Нужен Rust 1.85+; для сборочных сценариев — Python 3.10+.
