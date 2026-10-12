@@ -59,6 +59,11 @@ pub struct Modifiers {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
+    #[cfg(feature = "webview")]
+    WebView {
+        id: webview::WebViewId,
+        event: webview::WebViewEvent,
+    },
     NativeResult {
         id: native::RequestId,
         result: Result<native::NativeResponse, Error>,
@@ -103,6 +108,16 @@ pub struct Context {
     next_request: u64,
 }
 impl Context {
+    /// Queue an operation on a native child WebView. Creation and script execution
+    /// finish asynchronously through `Event::WebView`.
+    #[cfg(feature = "webview")]
+    pub fn webview(
+        &mut self,
+        id: webview::WebViewId,
+        command: webview::WebViewCommand,
+    ) -> native::RequestId {
+        self.native_request(native::NativeRequest::WebView { id, command })
+    }
     /// Queue a native operation; completion is delivered as `Event::NativeResult`.
     pub fn native_request(&mut self, request: native::NativeRequest) -> native::RequestId {
         self.next_request = self

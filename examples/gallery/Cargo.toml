@@ -15,3 +15,13 @@ rusterize = { path = "../../crates/rusterize" }
 [[bin]]
 name = "gallery"
 path = "src/main.rs"
+
+[[example]]
+name = "web_checks"
+path = "examples/web_checks.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "web_services"
+path = "examples/web_services.rs"
+crate-type = ["cdylib"]

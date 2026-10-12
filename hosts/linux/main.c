@@ -84,6 +84,9 @@ typedef struct {
 } App;
 
 static App *service_app;
+#ifdef RUSTERIZE_WEBVIEW
+#include "webview.h"
+#endif
 typedef struct {GMainLoop *loop;char *text;GError *error;int response;} NativeWait;
 static void clipboard_ready(GObject *source,GAsyncResult *result,gpointer data){NativeWait *w=data;w->text=gdk_clipboard_read_text_finish(GDK_CLIPBOARD(source),result,&w->error);g_main_loop_quit(w->loop);}
 static void dialog_ready(gpointer dialog,int response,gpointer data){(void)dialog;NativeWait *w=data;w->response=response;g_main_loop_quit(w->loop);}
@@ -92,8 +95,15 @@ static const uint8_t *native_service(const uint8_t *data,size_t len,size_t *size
     static GByteArray *previous=NULL;GByteArray *out=g_byte_array_new();Reader r={data,data+len,TRUE};uint32_t op=u32(&r);char *error=NULL;put_u32(out,0);
     App *app=service_app;
     if(op==1){NativeText text=native_text(&r);if(r.ok)text_metrics(&text,out);native_text_free(&text);}
-    else if(op==2)put_u32(out,1|2|4|8|16|128|256|512);
+    else if(op==2)put_u32(out,1|2|4|8|16|128|256|512
+#ifdef RUSTERIZE_WEBVIEW
+        |1024
+#endif
+    );
     else if(!app || !app->window)error=g_strdup("No active native window");
+#ifdef RUSTERIZE_WEBVIEW
+    else if(op==20 || op==21)error=web_command(op,&r,out);
+#endif
     else if(op==3) {
         NativeWait wait={0};wait.loop=g_main_loop_new(NULL,FALSE);
         gdk_clipboard_read_text_async(gtk_widget_get_clipboard(app->window),NULL,clipboard_ready,&wait);g_main_loop_run(wait.loop);g_main_loop_unref(wait.loop);
@@ -225,6 +235,13 @@ static void activate(GtkApplication *gtk,gpointer ptr) {
     GtkWidget *header=gtk_header_bar_new();gtk_widget_add_css_class(header,"rusterize-chrome");gtk_window_set_titlebar(GTK_WINDOW(app->window),header);
     app->chrome=gtk_css_provider_new();gtk_style_context_add_provider_for_display(gtk_widget_get_display(app->window),GTK_STYLE_PROVIDER(app->chrome),GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);update_chrome(app);
     app->area=gtk_drawing_area_new();gtk_widget_set_size_request(app->area,window_float(app,2),window_float(app,3));gtk_widget_set_focusable(app->area,TRUE);gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(app->area),draw,app,NULL);gtk_window_set_child(GTK_WINDOW(app->window),app->area);
+#ifdef RUSTERIZE_WEBVIEW
+    g_object_ref(app->area);gtk_window_set_child(GTK_WINDOW(app->window),NULL);
+    GtkWidget *overlay=gtk_overlay_new();gtk_overlay_set_child(GTK_OVERLAY(overlay),app->area);g_object_unref(app->area);
+    web_layer=gtk_fixed_new();gtk_widget_set_can_target(web_layer,FALSE);gtk_overlay_add_overlay(GTK_OVERLAY(overlay),web_layer);
+    gtk_window_set_child(GTK_WINDOW(app->window),overlay);
+    g_signal_connect(app->window,"close-request",G_CALLBACK(web_window_closing),NULL);
+#endif
     GtkGesture *click=gtk_gesture_click_new();gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click),0);g_signal_connect(click,"pressed",G_CALLBACK(pressed),app);g_signal_connect(click,"released",G_CALLBACK(released),app);g_signal_connect(click,"cancel",G_CALLBACK(cancel),app);gtk_widget_add_controller(app->area,GTK_EVENT_CONTROLLER(click));
     GtkEventController *move=gtk_event_controller_motion_new();g_signal_connect(move,"motion",G_CALLBACK(motion),app);gtk_widget_add_controller(app->area,move);
     GtkEventController *wheel=gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES);g_signal_connect(wheel,"scroll",G_CALLBACK(scroll),app);gtk_widget_add_controller(app->area,wheel);
@@ -243,7 +260,11 @@ int main(int argc,char **argv) {
         cairo_destroy(context);cairo_surface_destroy(surface);g_hash_table_destroy(app.images);g_hash_table_destroy(app.keys);rusterize_destroy(app.id);return ok?0:1;
     }
     GtkApplication *gtk=gtk_application_new("dev.rusterize.app",G_APPLICATION_NON_UNIQUE);g_signal_connect(gtk,"activate",G_CALLBACK(activate),&app);
-    int code=g_application_run(G_APPLICATION(gtk),argc,argv);
+    int app_argc=(argc==2 && strcmp(argv[1],"--smoke")==0)?1:argc;
+    int code=g_application_run(G_APPLICATION(gtk),app_argc,argv);
+#ifdef RUSTERIZE_WEBVIEW
+    web_close();
+#endif
     if(app.chrome){GdkDisplay *display=gdk_display_get_default();if(display)gtk_style_context_remove_provider_for_display(display,GTK_STYLE_PROVIDER(app.chrome));g_object_unref(app.chrome);}
     g_object_unref(gtk);g_hash_table_destroy(app.images);g_hash_table_destroy(app.keys);rusterize_destroy(app.id);return app.failed?1:code;
 }

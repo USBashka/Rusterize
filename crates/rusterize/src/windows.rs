@@ -569,6 +569,9 @@ pub fn render_offscreen_with(
     }
 }
 
+#[cfg(feature = "webview")]
+mod webview;
+
 struct State<A: Application> {
     engine: RefCell<Engine<A>>,
     device: RefCell<Option<(ID2D1HwndRenderTarget, D2dRenderer)>>,
@@ -602,6 +605,12 @@ impl<A: Application> State<A> {
                 let Some((id, request)) = request else { break };
                 let result = native::execute(&request);
                 self.event(Event::NativeResult { id, result });
+            }
+            for _ in 0..64 {
+                let Some(event) = native::poll_host_event() else {
+                    break;
+                };
+                self.event(event);
             }
             self.processing_native.set(false);
         }
@@ -861,6 +870,8 @@ unsafe fn window_message<A: Application>(
         ((l.0 >> 16) as u16 as i16) as f32 / scale,
     );
     match message {
+        #[cfg(feature = "webview")]
+        webview::WAKE => {}
         WM_ERASEBKGND => return LRESULT(1),
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
@@ -893,6 +904,8 @@ unsafe fn window_message<A: Application>(
             }
         }
         WM_DPICHANGED => {
+            #[cfg(feature = "webview")]
+            webview::update_bounds(hwnd);
             let r = &*(l.0 as *const RECT);
             let _ = SetWindowPos(
                 hwnd,

@@ -142,10 +142,19 @@ func nativeService(_ data:UnsafePointer<UInt8>?,_ count:Int,_ length:UnsafeMutab
         guard let data=data else {throw WireError.malformed}
         var r=Reader(data:Data(bytes:data,count:count));let op=try r.u32()
         if op==1 {out.data.append(try NativeText(&r).metrics())}
-        else if op==2 {out.u32(1023)}
+        else if op==2 {
+            #if RUSTERIZE_WEBVIEW
+            out.u32(2047)
+            #else
+            out.u32(1023)
+            #endif
+        }
         else {
             guard let view=nativeView,let window=view.window else {throw WireError.native("No active native window")}
             switch op {
+            #if RUSTERIZE_WEBVIEW
+            case 20,21: out.data.append(try view.webviews.command(op, &r))
+            #endif
             case 3: out.data.append(Data((NSPasteboard.general.string(forType:.string) ?? "").utf8))
             case 4: let text=try r.string();NSPasteboard.general.clearContents();if !NSPasteboard.general.setString(text,forType:.string){throw WireError.native("Clipboard write failed")}
             case 5:
@@ -176,6 +185,9 @@ func nativeService(_ data:UnsafePointer<UInt8>?,_ count:Int,_ length:UnsafeMutab
 }
 
 final class RusterizeView: NSView {
+    #if RUSTERIZE_WEBVIEW
+    lazy var webviews = NativeWebViews(self)
+    #endif
     private var handle = rusterize_create()
     private let origin = ProcessInfo.processInfo.systemUptime
     private var timer: Timer?
@@ -208,6 +220,7 @@ final class RusterizeView: NSView {
             }
         } else { timer?.invalidate(); timer = nil }
     }
+    func pollNative() { schedule() }
     func updateChrome() {
         guard let window = window else {return}
         let revision = rusterize_window_option(handle,8)
@@ -332,6 +345,11 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
     func windowDidResignKey(_ n:Notification){view.event(9)}
     func windowDidMiniaturize(_ n:Notification){view.event(10)}
     func windowDidDeminiaturize(_ n:Notification){view.event(11)}
+    func windowWillClose(_ n:Notification){
+        #if RUSTERIZE_WEBVIEW
+        view.webviews.close()
+        #endif
+    }
     func applicationDidHide(_ n:Notification){view.event(10)}
     func applicationDidUnhide(_ n:Notification){view.event(11)}
 }

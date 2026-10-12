@@ -1,6 +1,6 @@
 ---
 name: rusterize
-description: Создавай, изменяй и проверяй приложения на Rust с Rusterize, используя нативные Canvas Windows, Android, Linux и macOS. Применяй при работе с Rusterize, его платформенными адаптерами и общим API рисования.
+description: Создавай, изменяй и проверяй приложения на Rust с Rusterize, используя нативные Canvas Windows, Android, Linux, macOS и браузерный WASM + Canvas 2D. Применяй при работе с Rusterize, его платформенными адаптерами и общим API рисования.
 ---
 
 # Работа с Rusterize
@@ -11,7 +11,8 @@ Rusterize — фреймворк нативного Canvas. Логика при�
 
 - Для нового приложения используй `cargo run -p rusterize-cli -- new <directory>` из checkout фреймворка. Генератор отказывается перезаписывать существующий каталог.
 - Для существующего проекта сначала прочитай его `Cargo.toml`, реализацию `Application` и [API](docs/API.md). Не заменяй платформенную оболочку ради обычной правки интерфейса.
-- Для сборки используй `python scripts/build.py --platform windows|android|linux|macos`; команды выполняются на соответствующей ОС, Android можно собирать с настольной системы.
+- Для сборки используй `python scripts/build.py --platform windows|android|linux|macos|web`; нативные desktop-команды выполняются на соответствующей ОС, Android и web можно собирать с настольной системы.
+- Для веба прочитай [WEB.md](docs/WEB.md), установи `rustup target add wasm32-unknown-unknown`. Используй тот же `export_app!(App)`, не добавляй wasm-bindgen/npm без необходимости. Features `shaders`/`webview` используют WebGL 2 и изолированные iframe. Системные запросы асинхронны; файлы доступны через токены и `rusterize::web`, а не `std::fs`. Проверь готовую сборку через HTTP: `scripts/check_web.mjs`, `scripts/check_web_features.mjs` и Rust fixtures `web_checks`/`web_services`.
 - Прежде чем заявлять о поддержке конкретной ОС, прочитай [проверки и ограничения](docs/VALIDATION.md) и проверь доступный SDK. Код адаптера, успешная компиляция и запуск на устройстве — разные уровни доказательства.
 
 ## Инварианты приложения
@@ -29,6 +30,8 @@ Rusterize — фреймворк нативного Canvas. Логика при�
 - `export_app!(App)` вызывается один раз в lib-crate и требует `Default`. Для Windows нужен bin с `rusterize::run_app`; Android требует `cdylib`, Linux/macOS — `staticlib`.
 
 ## Изменение бэкендов
+
+Для нативного WebView используй [WEBVIEW.md](docs/WEBVIEW.md) и опциональную feature `webview`. Создавай дочерний элемент через `Context::webview`, жди `WebViewEvent::Ready`, обновляй границы на Resize. Это слой над Canvas, а не команда рисования. Проверяй `NativeResult` и асинхронные ошибки. Не включай браузерный runtime в дистрибутив по умолчанию и не приравнивай capability адаптера к наличию runtime. JavaScript включается явно; привилегированного IPC нет.
 
 Для WGSL используй [SHADERS.md](docs/SHADERS.md): `shaders` — опциональная feature, `rusterize-shader-build` — только build-dependency. Храни ShaderRenderer на UI-потоке и кэшируй статические Image. Текущий путь использует системный OpenGL с readback; не называй его Metal/D3D/AGSL или zero-copy. GPU-тесты выполняются отдельно: `cargo test -p rusterize-shaders --test gpu -- --ignored --nocapture`.
 

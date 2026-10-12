@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rusterize", "crates/rusterize-cli", "crates/rusterize-shader-build", "examples/gallery", "examples/native-api", "examples/shaders"]
+members = ["crates/rusterize", "crates/rusterize-cli", "crates/rusterize-shader-build", "examples/gallery", "examples/native-api", "examples/shaders", "examples/webview"]
 default-members = ["crates/rusterize", "crates/rusterize-cli", "examples/gallery", "examples/native-api"]
 resolver = "2"
 

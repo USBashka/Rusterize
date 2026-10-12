@@ -36,6 +36,8 @@ let page_text = &layout.text()[..end];
 
 ## Системные действия
 
+В веб-оболочке доступны текст, курсор, файловые/модальные диалоги, URI и iframe WebView; clipboard и fullscreen зависят от доступности браузерных API. Запросы асинхронны, результат приходит через `NativeResult`. Файловые диалоги возвращают токены для `rusterize::web::{read_file,write_file,list_directory,release_file}`; системных путей и произвольного доступа к диску нет. Ограничения разрешений, управления окном, текста и ввода — в [WEB.md](WEB.md).
+
 ```rust
 use rusterize::{native::*, *};
 
@@ -107,3 +109,7 @@ python scripts/build.py --platform android --package rusterize-native-api --abi 
 ```
 
 `examples/native-api` показывает настоящую раскладку Unicode, чтение clipboard, выбор файлов и fullscreen. Недоступные действия отключаются по capabilities. При создании layout пример проверяет пропорциональные метрики, пустые строки, emoji, комбинируемые символы и границы UTF-8. `native-api.exe target/native-api.bgra` сохраняет Windows-кадр 800×600 без окна. Точные результаты сборки и исполнения — в [VALIDATION.md](VALIDATION.md).
+
+## WebView
+
+Feature `webview` предоставляет общий API дочерних WebView четырёх нативных оболочек и браузерного iframe. Подключение, события и ограничения: [WEBVIEW.md](WEBVIEW.md). `NativeCapabilities::WEBVIEW` — бит 1024, наличие адаптера, а не гарантия наличия системного runtime.

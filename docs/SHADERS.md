@@ -81,6 +81,7 @@ canvas.with_save(|canvas| {
 | Android 8+ | EGL и OpenGL ES 3.0; доступность зависит от устройства |
 | Linux | EGL, OpenGL ES 3.0; для сборки оболочки нужен пакет разработки EGL, например `libegl1-mesa-dev` |
 | macOS | Системный CGL/OpenGL 4.1 core; Apple объявила OpenGL устаревшим |
+| Веб | WebGL 2, GLSL ES 300; raw WASM ABI без glow/wasm-bindgen в runtime |
 
 При отсутствии подходящего драйвера `ShaderRenderer::new()` возвращает ошибку. Приложение выбирает обычную заливку либо показывает ошибку. Автоматического скрытого CPU-интерпретатора WGSL нет. Mesa может предоставлять программную реализацию OpenGL; фактический исполнитель доступен через `renderer_name()`.
 
@@ -98,6 +99,7 @@ Renderer сохраняет контекст, до 32 программ, пове
 
 ```sh
 python scripts/build.py --platform windows --package rusterize-shaders
+python scripts/build.py --platform web --package rusterize-shaders
 python scripts/build.py --platform android --package rusterize-shaders --abi arm64-v8a --abi x86_64
 cargo test -p rusterize-shader-build
 cargo test -p rusterize-shaders --test gpu -- --ignored --nocapture

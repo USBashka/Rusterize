@@ -114,7 +114,14 @@ pub fn compile_file(input: impl AsRef<Path>, output_name: &str) -> Result<(), St
     let target = match env::var("CARGO_CFG_TARGET_OS").as_deref() {
         Ok("windows" | "macos") => Target::Desktop,
         Ok("linux" | "android") => Target::Gles,
-        _ => return Err("Rusterize shaders support Windows, Linux, macOS and Android".into()),
+        Ok("unknown") if env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32") => {
+            Target::Gles
+        }
+        _ => {
+            return Err(
+                "Rusterize shaders support Windows, Linux, macOS, Android and browser WASM".into(),
+            )
+        }
     };
     let source = fs::read_to_string(input).map_err(|e| format!("{}: {e}", input.display()))?;
     let compiled = compile(&source, target).map_err(|e| format!("{}: {e}", input.display()))?;

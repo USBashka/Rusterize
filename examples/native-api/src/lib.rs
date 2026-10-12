@@ -65,6 +65,8 @@ impl Application for App {
             }
             Event::NativeResult { result, .. } => {
                 self.status = match result {
+                    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+                    Ok(NativeResponse::Bytes(bytes)) => format!("Прочитано {} байт", bytes.len()),
                     Ok(NativeResponse::Text(s)) => s,
                     Ok(NativeResponse::Paths(p)) => p
                         .iter()

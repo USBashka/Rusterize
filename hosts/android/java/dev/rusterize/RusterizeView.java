@@ -32,6 +32,7 @@ public final class RusterizeView extends View implements AutoCloseable {
     private static native byte[] nativeFrame(long id, float w, float h, float scale, double seconds);
     private long handle = nativeCreate();
     private boolean suspended;
+    private final NativeWebViews webviews;
     private int windowRevision;
     private Integer originalStatus,originalNavigation,originalFlags,originalRootColor;
     private final long origin = System.nanoTime();
@@ -45,6 +46,9 @@ public final class RusterizeView extends View implements AutoCloseable {
     private final HashSet<Long> usedImages = new HashSet<>();
     public RusterizeView(Context context) {
         super(context); active = new WeakReference<>(this); setFocusable(true); setFocusableInTouchMode(true);
+        webviews = new NativeWebViews(this, new Runnable() {
+            @Override public void run() { if(handle!=0)schedule(nativeStatus(handle)); }
+        });
         paint.setStrokeCap(Paint.Cap.BUTT); paint.setStrokeJoin(Paint.Join.MITER); paint.setStrokeMiter(10);
     }
     private float density() { return getResources().getDisplayMetrics().density; }
@@ -77,9 +81,10 @@ public final class RusterizeView extends View implements AutoCloseable {
     private void event(int kind, float x, float y, float dx, float dy, int detail, int flags) {
         if (handle != 0) schedule(nativeEvent(handle, kind, x, y, dx, dy, detail, flags));
     }
-    public void resume() { suspended = false; event(11,0,0,0,0,0,0); }
-    public void suspend() { suspended = true; event(10,0,0,0,0,0,0); }
+    public void resume() { suspended = false; webviews.resume(); event(11,0,0,0,0,0,0); }
+    public void suspend() { suspended = true; webviews.suspend(); event(10,0,0,0,0,0,0); }
     @Override public void close() {
+        webviews.close();
         if (handle != 0) { nativeDestroy(handle); handle = 0; }
         // Hardware display lists may still reference a bitmap until the next render pass.
         bitmaps.clear();
@@ -221,10 +226,11 @@ public final class RusterizeView extends View implements AutoCloseable {
             ByteBuffer b=ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);int op=b.getInt();
             integer(out,0);
             if(op==1){raw(out,new NativeText(b).metrics());return out.toByteArray();}
-            if(op==2){integer(out,1|2|4|256|512);return out.toByteArray();}
+            if(op==2){integer(out,1|2|4|256|512|NativeWebViews.CAPABILITY);return out.toByteArray();}
             RusterizeView view=active.get();if(view==null)throw new IllegalStateException("No active native view");
             Context context=view.getContext();
             switch(op) {
+                case 20: case 21: raw(out,view.webviews.command(op,b));break;
                 case 3: {
                     ClipboardManager clipboard=(ClipboardManager)context.getSystemService(Context.CLIPBOARD_SERVICE);
                     ClipData clip=clipboard.getPrimaryClip();CharSequence value=clip==null||clip.getItemCount()==0?"":clip.getItemAt(0).coerceToText(context);

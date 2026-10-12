@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebView</title>
+<style>
+:root { color-scheme: dark; font: 16px system-ui, sans-serif; color: #e8edf5; background: #172536 }
+body { margin: 0; padding: 32px; box-sizing: border-box }
+h1 { margin: 0 0 28px; font-size: 28px; font-weight: 600 }
+button { border: 0; border-radius: 10px; padding: 13px 22px; font: inherit; cursor: pointer; background: #79e2c0; color: #101923 }
+button:hover { background: #a4f4d9 }
+input { display: block; margin: 28px 0; width: min(100%, 320px); box-sizing: border-box; padding: 12px; border: 1px solid #557086; border-radius: 8px; background: #101923; color: inherit; font: inherit }
+</style>
+<h1>WebView</h1>
+<button onclick="document.getElementById('count').textContent=++count">Нажатия: <span id="count">0</span></button>
+<input aria-label="Текст" placeholder="Введите текст">
+<script>let count = 0;</script>
+</html>

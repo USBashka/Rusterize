@@ -1,4 +1,4 @@
-"""Build native Rusterize hosts with the platform SDK and Python's standard library."""
+"""Build Rusterize native and browser hosts using Python's standard library."""
 from __future__ import annotations
 import argparse
 import json
@@ -51,6 +51,17 @@ def sdk_home() -> Path:
             return p
     raise RuntimeError('Set ANDROID_HOME to your Android SDK')
 
+def enabled_feature(package, feature, env, feature_args, target=None):
+    command = ['cargo', 'tree', '-p', package, '-e', 'normal', '--prefix', 'none',
+               '--format', '{p}|{f}', *feature_args]
+    if target:
+        command += ['--target', target]
+    for line in run(command, env=env, capture=True).splitlines():
+        name, separator, features = line.partition('|')
+        if separator and name.startswith('rusterize v'):
+            return feature in features.split(',')
+    return False
+
 def build_android(args, package, library, target_dir, output, env):
     sdk = sdk_home()
     ndk_setting = args.ndk or os.environ.get('ANDROID_NDK_HOME')
@@ -80,7 +91,9 @@ def build_android(args, package, library, target_dir, output, env):
     java = java_home()
     tools = latest(sdk/'build-tools','*')
     android_jar = latest(sdk/'platforms','android-*')/'android.jar'
-    build = target_dir/'rusterize/android'
+    webview = enabled_feature(package['name'], 'webview', env,
+                              ['--features', args.features] if args.features else [], targets[abis[0]][0])
+    build = target_dir/'rusterize/android'/('webview' if webview else 'canvas')
     classes, dex = build/'classes', build/'dex'
     classes.mkdir(parents=True,exist_ok=True)
     dex.mkdir(parents=True,exist_ok=True)
@@ -88,10 +101,14 @@ def build_android(args, package, library, target_dir, output, env):
     app_id = args.app_id or ('dev.rusterize.'+package['name'].replace('-','').replace('_',''))
     if not re.fullmatch(r'[a-zA-Z]\w*(\.[a-zA-Z]\w*)+',app_id):
         raise RuntimeError('Invalid --app-id')
-    manifest.write_text((ROOT/'hosts/android/AndroidManifest.xml').read_text(encoding='utf-8').replace('dev.rusterize.gallery',app_id),encoding='utf-8')
+    manifest_text = (ROOT/'hosts/android/AndroidManifest.xml').read_text(encoding='utf-8').replace('dev.rusterize.gallery',app_id)
+    if webview:
+        manifest_text = manifest_text.replace('<application', '<uses-permission android:name="android.permission.INTERNET"/>\n    <application')
+    manifest.write_text(manifest_text,encoding='utf-8')
     unsigned, aligned = build/'unsigned.apk',build/'aligned.apk'
     run([tools/('aapt2'+tool_suffix),'link','-I',android_jar,'--manifest',manifest,'-o',unsigned],env=env)
     sources = sorted((ROOT/'hosts/android/java').rglob('*.java'))
+    sources.append(ROOT/'hosts/android'/('webview' if webview else 'no-webview')/'NativeWebViews.java')
     run([java/'bin'/('javac'+tool_suffix),'-encoding','UTF-8','-source','8','-target','8','-Xlint:-options','-bootclasspath',android_jar,'-d',classes,*sources],env=env)
     run([java/'bin'/('java'+tool_suffix),'-cp',tools/'lib/d8.jar','com.android.tools.r8.D8','--min-api','26','--lib',android_jar,'--output',dex,*sorted(classes.rglob('*.class'))],env=env)
     with zipfile.ZipFile(unsigned,'a',compression=zipfile.ZIP_DEFLATED) as apk:
@@ -108,9 +125,25 @@ def build_android(args, package, library, target_dir, output, env):
     run([java/'bin'/('java'+tool_suffix),'-jar',tools/'lib/apksigner.jar','verify','--verbose',artifact],env=env)
     return artifact
 
+def build_web(args, package, target_dir, output, env, feature_args):
+    target = 'wasm32-unknown-unknown'
+    library = next((t['name'] for t in package['targets'] if 'cdylib' in t['kind']), None)
+    if not library:
+        raise RuntimeError('Web app needs a cdylib target and export_app!(App)')
+    run(['cargo', 'build', '--release', '--lib', '-p', package['name'],
+         '--target', target, *feature_args], env=env)
+    artifact = output/'web'/package['name']
+    artifact.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(target_dir/target/'release'/(library+'.wasm'), artifact/'app.wasm')
+    for source in sorted((ROOT/'hosts/web').glob('*.js')):
+        shutil.copy2(source, artifact/source.name)
+    shutil.copy2(ROOT/'hosts/web/index.html', artifact/'index.html')
+    print(f'Serve over HTTP: python -m http.server 8000 --bind 127.0.0.1 --directory "{artifact}"', flush=True)
+    return artifact
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--platform',choices=['windows','android','linux','macos'],default={'Windows':'windows','Darwin':'macos'}.get(platform.system(),'linux'))
+    parser.add_argument('--platform',choices=['windows','android','linux','macos','web'],default={'Windows':'windows','Darwin':'macos'}.get(platform.system(),'linux'))
     parser.add_argument('--package')
     parser.add_argument('--out',type=Path,default=ROOT/'dist')
     parser.add_argument('--ndk')
@@ -135,7 +168,9 @@ def main():
     target_dir = Path(metadata['target_directory'])
     output = args.out.resolve()
     output.mkdir(parents=True,exist_ok=True)
-    if args.platform=='android':
+    if args.platform=='web':
+        artifact = build_web(args,package,target_dir,output,env,feature_args)
+    elif args.platform=='android':
         if not library:
             raise RuntimeError('Android app needs a cdylib target and export_app!(App)')
         artifact = build_android(args,package,library,target_dir,output,env)
@@ -150,21 +185,23 @@ def main():
         if sys.platform!='linux' or not library:
             raise RuntimeError('Linux builds need Linux, a staticlib target and libgtk-4-dev')
         run(['cargo','build','--release','--lib','-p',name,*feature_args],env=env)
-        shaders = 'rusterize feature "shaders"' in run(['cargo','tree','-p',name,'-e','features',*feature_args],env=env,capture=True)
-        flags = shlex.split(run(['pkg-config','--cflags','--libs','gtk4','pangocairo'],capture=True))
+        shaders = enabled_feature(name, 'shaders', env, feature_args)
+        webview = enabled_feature(name, 'webview', env, feature_args)
+        flags = shlex.split(run(['pkg-config','--cflags','--libs','gtk4','pangocairo',*(['webkitgtk-6.0'] if webview else [])],capture=True))
         artifact = output/name
-        run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',ROOT/'hosts/linux/main.c',target_dir/'release'/('lib'+library+'.a'),*flags,*(['-lEGL'] if shaders else []),'-ldl','-lpthread','-lm','-lrt','-lutil','-o',artifact],env=env)
+        run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',*(['-DRUSTERIZE_WEBVIEW'] if webview else []),ROOT/'hosts/linux/main.c',target_dir/'release'/('lib'+library+'.a'),*flags,*(['-lEGL'] if shaders else []),'-ldl','-lpthread','-lm','-lrt','-lutil','-o',artifact],env=env)
         run(['strip',artifact],env=env)
     else:
         if sys.platform!='darwin' or not library:
             raise RuntimeError('macOS builds need macOS/Xcode and a staticlib target')
         env['MACOSX_DEPLOYMENT_TARGET'] = '11.0'
         run(['cargo','build','--release','--lib','-p',name,*feature_args],env=env)
-        shaders = 'rusterize feature "shaders"' in run(['cargo','tree','-p',name,'-e','features',*feature_args],env=env,capture=True)
+        shaders = enabled_feature(name, 'shaders', env, feature_args)
+        webview = enabled_feature(name, 'webview', env, feature_args)
         artifact = output/(name+'.app')
         executable = artifact/'Contents/MacOS'/name
         executable.parent.mkdir(parents=True,exist_ok=True)
-        run(['swiftc','-Osize','-target',platform.machine()+'-apple-macosx11.0','-import-objc-header',ROOT/'hosts/rusterize.h',ROOT/'hosts/macos/main.swift',target_dir/'release'/('lib'+library+'.a'),'-framework','AppKit','-framework','CoreGraphics','-framework','CoreText',*(['-framework','OpenGL'] if shaders else []),'-o',executable],env=env)
+        run(['swiftc','-Osize','-target',platform.machine()+'-apple-macosx11.0','-import-objc-header',ROOT/'hosts/rusterize.h',ROOT/'hosts/macos/main.swift',*(['-D','RUSTERIZE_WEBVIEW',ROOT/'hosts/macos/webview.swift','-framework','WebKit'] if webview else []),target_dir/'release'/('lib'+library+'.a'),'-framework','AppKit','-framework','CoreGraphics','-framework','CoreText',*(['-framework','OpenGL'] if shaders else []),'-o',executable],env=env)
         with (artifact/'Contents/Info.plist').open('wb') as file:
             plistlib.dump({'CFBundleExecutable':name,'CFBundleName':name,'CFBundleIdentifier':args.app_id or 'dev.rusterize.app','CFBundlePackageType':'APPL','NSHighResolutionCapable':True,'LSMinimumSystemVersion':'11.0'},file)
         run(['codesign','--force','--sign','-',artifact],env=env)

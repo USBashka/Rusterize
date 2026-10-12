@@ -28,6 +28,8 @@ pub(super) fn cursor(hwnd: HWND) -> Option<HCURSOR> {
     CURSORS.with(|c| c.borrow().get(&(hwnd.0 as isize)).copied())
 }
 pub(super) fn forget(hwnd: HWND) {
+    #[cfg(feature = "webview")]
+    super::webview::forget(hwnd);
     CURSORS.with(|c| c.borrow_mut().remove(&(hwnd.0 as isize)));
     FULLSCREEN.with(|c| c.borrow_mut().remove(&(hwnd.0 as isize)));
 }
@@ -50,10 +52,16 @@ pub(crate) fn query(bytes: &[u8]) -> Result<Vec<u8>, Error> {
         return super::text::measure(&s, &style, options);
     }
     if op == 2 {
-        return Ok(1023u32.to_le_bytes().to_vec());
+        return Ok((1023u32 | if cfg!(feature = "webview") { 1024 } else { 0 })
+            .to_le_bytes()
+            .to_vec());
     }
     let hwnd = current_window()
         .ok_or_else(|| Error("this native operation requires an application window".into()))?;
+    #[cfg(feature = "webview")]
+    if op == 20 || op == 21 {
+        return super::webview::query(hwnd, op, &mut r);
+    }
     let mut result = crate::protocol::Writer(Vec::new());
     unsafe {
         match op {

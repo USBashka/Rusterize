@@ -23,6 +23,10 @@ pub mod protocol;
 #[cfg(feature = "shaders")]
 pub mod shader;
 mod text;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub mod web;
+#[cfg(feature = "webview")]
+pub mod webview;
 
 pub use app::*;
 pub use canvas::*;

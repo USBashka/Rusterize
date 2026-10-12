@@ -254,7 +254,7 @@ pub fn decode_key(code: u32) -> Key {
     }
 }
 
-/// Export a `Default + Application` type for the Android, GTK and Apple hosts.
+/// Export a `Default + Application` type for Android, GTK, Apple and browser hosts.
 /// Call once, in the application's library crate.
 #[macro_export]
 macro_rules! export_app {
@@ -269,8 +269,26 @@ macro_rules! export_app {
             for _ in 0..64 {
                 let request=RUSTERIZE_HOST.with(|h|h.borrow_mut().pop_native_request(id));
                 let Some((request_id,request))=request else {break};
+                #[cfg(all(target_arch="wasm32",target_os="unknown"))]
+                {
+                    if let Err(error)=$crate::web::submit(id,request_id,request) {
+                        RUSTERIZE_HOST.with(|h|h.borrow_mut().event(id,$crate::Event::NativeResult{id:request_id,result:Err(error)}));
+                    }
+                }
+                #[cfg(not(all(target_arch="wasm32",target_os="unknown")))]
+                {
                 let result=$crate::native::execute_host_request(&request);
                 RUSTERIZE_HOST.with(|h|h.borrow_mut().event(id,$crate::Event::NativeResult{id:request_id,result}));
+                }
+            }
+            #[cfg(all(target_arch="wasm32",target_os="unknown"))]
+            for _ in 0..64 {
+                let Some(event)=$crate::web::poll_result(id) else {break};
+                RUSTERIZE_HOST.with(|h|h.borrow_mut().event(id,event));
+            }
+            for _ in 0..64 {
+                let Some(event)=$crate::native::poll_host_event() else {break};
+                RUSTERIZE_HOST.with(|h|h.borrow_mut().event(id,event));
             }
             RUSTERIZE_POLLING.with(|p|p.set(false));rusterize_status(id)
         }
@@ -283,7 +301,11 @@ macro_rules! export_app {
             let canvas=unsafe {$crate::native::HostCanvas::from_raw(platform,context,view,window)};
             RUSTERIZE_HOST.with(|h|h.borrow_mut().native_draw(id,&canvas)).map_or($crate::host::FAILED,|_|0)
         }
-        #[no_mangle] pub extern "C" fn rusterize_destroy(id: u64) { RUSTERIZE_HOST.with(|h| h.borrow_mut().destroy(id)); }
+        #[no_mangle] pub extern "C" fn rusterize_destroy(id: u64) {
+            #[cfg(all(target_arch="wasm32",target_os="unknown"))]
+            $crate::web::cancel(id);
+            RUSTERIZE_HOST.with(|h| h.borrow_mut().destroy(id));
+        }
         #[no_mangle] pub extern "C" fn rusterize_status(id: u64) -> u32 { RUSTERIZE_HOST.with(|h| h.borrow().status(id)) }
         #[no_mangle] pub extern "C" fn rusterize_title(id:u64)->*const std::ffi::c_char {RUSTERIZE_HOST.with(|h|h.borrow().title(id).as_ptr())}
         #[no_mangle] pub extern "C" fn rusterize_window_option(id:u64,option:u32)->u32 {RUSTERIZE_HOST.with(|h|h.borrow().window_option(id,option))}

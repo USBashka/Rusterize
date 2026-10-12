@@ -1,5 +1,7 @@
 # API
 
+Веб-цель `--platform web` использует общий `Application`, Canvas, события и `TextLayout`. Загрузка — через `start(canvas, wasmUrl)` из `hosts/web/rusterize.js`; остановка — `destroy()`. Системные capabilities: текст и курсор. [Сборка, жизненный цикл и ограничения браузера](WEB.md).
+
 ## Окно и заголовок
 
 `Application::window_options()` возвращает начальные параметры для всех оболочек. `run_app(app)` использует их на Windows; `run(app, options)` позволяет явно переопределить. В `WindowOptions` доступны title, size, min_size, title_bar и resizable. Размеры — логические пиксели, допустимый диапазон 1…32768. Android выбирает размер из доступной области экрана и игнорирует desktop resize-параметры.
@@ -64,6 +66,8 @@ canvas.with_save(|c| {
 При `Suspend` движок останавливает запросы анимации, при `Resume` сбрасывает delta. Состояние сохраняется в памяти, пока жива оболочка. Сохранение после уничтожения процесса/Activity должно реализовываться приложением; сериализации состояния в ядре пока нет.
 
 ## Нативный код
+
+Feature `webview` добавляет `Context::webview`, `webview::{WebViewId, WebViewOptions, WebViewCommand, WebViewEvent}` и `Event::WebView`. Системный браузер размещается над Canvas; HTML, URL, JavaScript, события загрузки и жизненный цикл описаны в [WEBVIEW.md](WEBVIEW.md).
 
 `Application::native_draw` даёт доступ к исходным объектам каждой ОС. Системные действия запрашиваются через `Context` и возвращаются как `Event::NativeResult`. Поддержка перечислена в [таблице](NATIVE_API.md).
 

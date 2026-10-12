@@ -64,6 +64,14 @@ pub struct FileDialog {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum NativeRequest {
+    /// Browser file token returned by the picker; never a system filesystem path.
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    BrowserFile(crate::web::FileRequest),
+    #[cfg(feature = "webview")]
+    WebView {
+        id: webview::WebViewId,
+        command: webview::WebViewCommand,
+    },
     ReadClipboard,
     WriteClipboard(String),
     SetCursor(Cursor),
@@ -72,11 +80,16 @@ pub enum NativeRequest {
     SetWindowPosition(Point),
     SetAlwaysOnTop(bool),
     FileDialog(FileDialog),
-    MessageDialog { title: String, message: String },
+    MessageDialog {
+        title: String,
+        message: String,
+    },
     OpenUri(String),
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NativeResponse {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    Bytes(Vec<u8>),
     Done,
     Text(String),
     Paths(Vec<std::path::PathBuf>),
@@ -98,6 +111,8 @@ impl NativeCapabilities {
     pub const FILE_DIALOG: u32 = 128;
     pub const MESSAGE_DIALOG: u32 = 256;
     pub const OPEN_URI: u32 = 512;
+    /// The host was built with WebView support; runtime availability is checked on creation.
+    pub const WEBVIEW: u32 = 1024;
     pub fn supports(self, features: u32) -> bool {
         self.0 & features == features
     }
@@ -129,7 +144,14 @@ pub(crate) fn query(request: &[u8]) -> Result<Vec<u8>, Error> {
     {
         crate::windows::services::query(request)
     }
-    #[cfg(not(all(windows, feature = "native")))]
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        crate::web::query(request)
+    }
+    #[cfg(not(any(
+        all(windows, feature = "native"),
+        all(target_arch = "wasm32", target_os = "unknown")
+    )))]
     {
         Err(Error(
             "native service is not installed on this thread".into(),
@@ -137,9 +159,13 @@ pub(crate) fn query(request: &[u8]) -> Result<Vec<u8>, Error> {
     }
 }
 
-pub(crate) fn execute(request: &NativeRequest) -> Result<NativeResponse, Error> {
+pub(crate) fn encode_request(request: &NativeRequest) -> Result<Vec<u8>, Error> {
     let mut w = crate::protocol::Writer(Vec::new());
     match request {
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        NativeRequest::BrowserFile(request) => crate::web::encode_file(request, &mut w)?,
+        #[cfg(feature = "webview")]
+        NativeRequest::WebView { id, command } => webview::encode(*id, command, &mut w)?,
         NativeRequest::ReadClipboard => w.u32(3),
         NativeRequest::WriteClipboard(s) => {
             check_string(s)?;
@@ -204,8 +230,18 @@ pub(crate) fn execute(request: &NativeRequest) -> Result<NativeResponse, Error> 
             w.bytes(uri.as_bytes());
         }
     }
-    let result = query(&w.0)?;
+    Ok(w.0)
+}
+pub(crate) fn execute(request: &NativeRequest) -> Result<NativeResponse, Error> {
+    decode_response(request, query(&encode_request(request)?)?)
+}
+pub(crate) fn decode_response(
+    request: &NativeRequest,
+    result: Vec<u8>,
+) -> Result<NativeResponse, Error> {
     match request {
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        NativeRequest::BrowserFile(request) => crate::web::decode_file(request, result),
         NativeRequest::ReadClipboard => Ok(NativeResponse::Text(
             String::from_utf8(result).map_err(|_| Error("clipboard was not UTF-8".into()))?,
         )),
@@ -234,7 +270,18 @@ pub(crate) fn execute(request: &NativeRequest) -> Result<NativeResponse, Error> 
 pub fn execute_host_request(request: &NativeRequest) -> Result<NativeResponse, Error> {
     execute(request)
 }
-fn check_string(s: &str) -> Result<(), Error> {
+#[doc(hidden)]
+pub fn poll_host_event() -> Option<Event> {
+    #[cfg(feature = "webview")]
+    {
+        webview::poll()
+    }
+    #[cfg(not(feature = "webview"))]
+    {
+        None
+    }
+}
+pub(crate) fn check_string(s: &str) -> Result<(), Error> {
     if s.contains('\0') || s.len() > 1024 * 1024 {
         Err(Error("native string contains NUL or exceeds 1 MiB".into()))
     } else {

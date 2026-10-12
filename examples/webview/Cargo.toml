@@ -1,0 +1,18 @@
+[package]
+name = "rusterize-webview"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+self-check = []
+
+[lib]
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "webview"
+path = "src/main.rs"
+
+[dependencies]
+rusterize = { path = "../../crates/rusterize", features = ["webview"] }

@@ -44,6 +44,52 @@ fn main() {
 }
 "#;
 const FILES: &[(&str, &str)] = &[
+    (
+        "hosts/web/wire.js",
+        include_str!("../../../hosts/web/wire.js"),
+    ),
+    (
+        "hosts/web/services.js",
+        include_str!("../../../hosts/web/services.js"),
+    ),
+    (
+        "hosts/web/shaders.js",
+        include_str!("../../../hosts/web/shaders.js"),
+    ),
+    (
+        "hosts/web/webviews.js",
+        include_str!("../../../hosts/web/webviews.js"),
+    ),
+    (
+        "hosts/web/files.js",
+        include_str!("../../../hosts/web/files.js"),
+    ),
+    (
+        "hosts/web/index.html",
+        include_str!("../../../hosts/web/index.html"),
+    ),
+    (
+        "hosts/web/rusterize.js",
+        include_str!("../../../hosts/web/rusterize.js"),
+    ),
+    ("docs/WEB.md", include_str!("../../../docs/WEB.md")),
+    (
+        "hosts/android/webview/NativeWebViews.java",
+        include_str!("../../../hosts/android/webview/NativeWebViews.java"),
+    ),
+    (
+        "hosts/android/no-webview/NativeWebViews.java",
+        include_str!("../../../hosts/android/no-webview/NativeWebViews.java"),
+    ),
+    (
+        "hosts/linux/webview.h",
+        include_str!("../../../hosts/linux/webview.h"),
+    ),
+    (
+        "hosts/macos/webview.swift",
+        include_str!("../../../hosts/macos/webview.swift"),
+    ),
+    ("docs/WEBVIEW.md", include_str!("../../../docs/WEBVIEW.md")),
     ("src/lib.rs", STARTER),
     ("src/main.rs", MAIN),
     (".gitignore", "/target/\n/dist/\n*.keystore\n__pycache__/\n"),
@@ -152,9 +198,9 @@ fn generate(destination: &Path, framework: &Path) -> io::Result<()> {
         }
         fs::write(file, text)?;
     }
-    fs::write(destination.join("README.md"),format!("# {name}\n\nПриложение на Rusterize. Код: `src/lib.rs`.\n\n```sh\npython scripts/build.py --platform windows\npython scripts/build.py --platform android\npython3 scripts/build.py --platform linux\npython3 scripts/build.py --platform macos\n```\n\nИспользуй нужную платформу и установленный SDK. [API](docs/API.md), [SKILL.md](SKILL.md).\n\nПуть к фреймворку задан в Cargo.toml; при переносе проекта обнови его. Android APK имеет отладочную подпись.\n"))?;
+    fs::write(destination.join("README.md"),format!("# {name}\n\nПриложение на Rusterize. Код: `src/lib.rs`.\n\n```sh\npython scripts/build.py --platform windows\npython scripts/build.py --platform android\npython3 scripts/build.py --platform linux\npython3 scripts/build.py --platform macos\nrustup target add wasm32-unknown-unknown\npython scripts/build.py --platform web\n```\n\nИспользуй нужную платформу и установленный SDK. [API](docs/API.md), [веб](docs/WEB.md), [SKILL.md](SKILL.md).\n\nДля веба: `python -m http.server 8000 --bind 127.0.0.1 --directory dist/web/{name}`, затем открой `http://127.0.0.1:8000`.\n\nПуть к фреймворку задан в Cargo.toml; при переносе проекта обнови его. Android APK имеет отладочную подпись.\n"))?;
     println!(
-        "Created {}\nBuild: python scripts/build.py --platform <windows|android|linux|macos>",
+        "Created {}\nBuild: python scripts/build.py --platform <windows|android|linux|macos|web>",
         destination.display()
     );
     Ok(())
@@ -215,7 +261,7 @@ fn execute() -> io::Result<()> {
             {
                 Ok(())
             } else {
-                Err(error("Native build failed"))
+                Err(error("Build failed"))
             }
         }
         Some("doctor") => {
@@ -245,7 +291,7 @@ fn execute() -> io::Result<()> {
             Ok(())
         }
         None | Some("help" | "--help" | "-h") => {
-            println!("cargo rusterize new <directory> [--framework <checkout>]\ncargo rusterize build [--platform windows|android|linux|macos] [build options]\ncargo rusterize doctor");
+            println!("cargo rusterize new <directory> [--framework <checkout>]\ncargo rusterize build [--platform windows|android|linux|macos|web] [build options]\ncargo rusterize doctor");
             Ok(())
         }
         _ => Err(error("Unknown command; use --help")),
