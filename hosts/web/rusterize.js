@@ -447,6 +447,17 @@ export async function start(canvas, wasmUrl, { onError = console.error, onExit =
   return {
     destroy,
     requestRedraw() { dirty = true; wake(); },
+    // Application-owned exports are an optional bridge for an embedding page.
+    callExport(name, ...args) {
+      if (destroyed) throw new Error('Rusterize instance has been destroyed');
+      if (!/^app_[a-z0-9_]+$/.test(name) || typeof exports[name] !== 'function')
+        throw new Error('Expected an application export with the app_ prefix');
+      if (!args.every(value => typeof value === 'number' && Number.isFinite(value)))
+        throw new Error('Application export arguments must be finite numbers');
+      const result = exports[name](...args);
+      dirty = true; wake();
+      return result;
+    },
     get frameCount() { return frames; },
     get stopped() { return destroyed; },
   };

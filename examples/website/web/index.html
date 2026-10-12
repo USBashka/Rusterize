@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f8f8f2">
+  <meta name="description" content="Rusterize — Rust-фреймворк с нативным Canvas для Windows, Android, Linux, macOS и веба. Попробуйте графику, анимацию, типографику и WGSL прямо на странице.">
+  <meta property="og:title" content="Rusterize — ближе к системе, свободнее в идеях">
+  <meta property="og:description" content="Один Rust-код. Пять платформ. Живые примеры на самом Rusterize.">
+  <meta property="og:type" content="website">
+  <title>Rusterize — рисуйте на Rust</title>
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./site.css">
+  <script type="module" src="./site.js"></script>
+</head>
+<body>
+  <canvas id="app" tabindex="-1" aria-hidden="true"></canvas>
+  <main id="content">
+    <header><h1>Rusterize. Ближе к системе. Свободнее в идеях.</h1>
+      <p>Ваш интерфейс на Rust. Нативное рисование на Windows, Android, Linux, macOS и в браузере.</p>
+      <nav aria-label="Главная навигация">
+        <a data-control="0" href="#demo">Возможности</a>
+        <a data-control="1" href="https://github.com/USBashka/Rusterize/blob/main/docs/API.md">Документация</a>
+        <a data-control="2" href="https://github.com/USBashka/Rusterize">GitHub</a>
+        <button data-control="3" id="theme" type="button" aria-label="Включить тёмную тему">Тема</button>
+      </nav>
+      <a data-control="4" href="#demo">Попробовать</a>
+      <a data-control="5" href="#start">Начать писать</a>
+      <button data-control="6" id="motion" type="button" aria-pressed="false">Остановить движение</button>
+    </header>
+    <section id="demo" aria-labelledby="demo-title">
+      <h2 id="demo-title">Попробуйте Rusterize</h2>
+      <p>Градиенты и отсечение, интерактивная анимация, переносы Unicode и WGSL-шейдер. Изменяйте параметры примера ползунком.</p>
+      <div role="tablist" aria-label="Демонстрации">
+        <button data-control="7" role="tab" id="tab-0" aria-controls="demo-description" aria-selected="true" tabindex="0">Графика</button>
+        <button data-control="8" role="tab" id="tab-1" aria-controls="demo-description" aria-selected="false" tabindex="-1">Движение</button>
+        <button data-control="9" role="tab" id="tab-2" aria-controls="demo-description" aria-selected="false" tabindex="-1">Текст</button>
+        <button data-control="10" role="tab" id="tab-3" aria-controls="demo-description" aria-selected="false" tabindex="-1">WGSL</button>
+      </div>
+      <p id="demo-description" role="tabpanel" aria-labelledby="tab-0">Скругление, градиент и отсечение.</p>
+      <input data-control="11" id="amount" type="range" min="0" max="100" value="50" aria-label="Скругление">
+      <button data-control="18" id="demo-motion" type="button" aria-pressed="false">Остановить движение</button>
+      <button data-control="12" class="color" type="button" aria-label="Оранжевый" aria-pressed="true">Оранжевый</button>
+      <button data-control="13" class="color" type="button" aria-label="Зелёный" aria-pressed="false">Зелёный</button>
+      <button data-control="14" class="color" type="button" aria-label="Сиреневый" aria-pressed="false">Сиреневый</button>
+    </section>
+    <section id="start" aria-labelledby="start-title">
+      <h2 id="start-title">От идеи к первому кадру</h2>
+      <p>Склонируйте репозиторий. Генератор создаст приложение с локальной зависимостью Rusterize. Нужны Rust 1.85+ и Python 3.10+.</p>
+      <pre>git clone https://github.com/USBashka/Rusterize.git
+cd Rusterize
+cargo run -p rusterize-cli -- new ../hello-rusterize
+cd ../hello-rusterize
+rustup target add wasm32-unknown-unknown
+python scripts/build.py --platform web</pre>
+      <button data-control="15" id="copy" type="button">Копировать пример Rust</button>
+    </section>
+    <footer>
+      <a data-control="16" href="https://github.com/USBashka/Rusterize/tree/main/examples/website">Исходный код страницы</a>
+      <a data-control="17" href="https://github.com/USBashka/Rusterize#создать-приложение">Документация и запуск</a>
+      <p>Rusterize 0.1. MIT / Apache-2.0. Графика этой страницы нарисована Rusterize.</p>
+    </footer>
+  </main>
+  <div id="loading" role="status" hidden>Загружаем Rusterize…</div>
+  <div id="notice" role="status" hidden></div>
+  <noscript><p>Для интерактивных примеров нужны JavaScript и WebAssembly. Описание и ссылки доступны выше.</p></noscript>
+</body>
+</html>

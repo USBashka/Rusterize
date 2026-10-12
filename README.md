@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/USBashka/Rusterize/actions/workflows/ci.yml/badge.svg)](https://github.com/USBashka/Rusterize/actions/workflows/ci.yml)
 
+[Попробовать в браузере](https://usbashka.github.io/Rusterize/) · [usbashka.ru/rusterize](https://usbashka.ru/rusterize) · [Исходный код страницы](examples/website)
+
 Rust-фреймворк для приложений с доступом к возможностям своей ОС. Один `Application` отвечает за состояние, ввод и рисунок; платформенная оболочка создаёт окно и исполняет команды.
 
 | Платформа | Рисование | Оболочка |

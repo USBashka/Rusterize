@@ -318,6 +318,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusterize-website"
+version = "0.1.0"
+dependencies = [
+ "rusterize",
+ "rusterize-shader-build",
+]
+
+[[package]]
 name = "rusterize-webview"
 version = "0.1.0"
 dependencies = [
