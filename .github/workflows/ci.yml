@@ -45,14 +45,26 @@ jobs:
       - run: cargo clippy --target wasm32-unknown-unknown -p rusterize-gallery -p rusterize-native-api -p rusterize-shaders -p rusterize-webview --lib --examples --locked -- -D warnings
       - run: npm install --prefix target/web-tools --no-save playwright@1.62.1
       - run: npx --prefix target/web-tools playwright install --with-deps ${{ matrix.browser }}
+      - name: Software OpenGL for Firefox
+        if: matrix.browser == 'firefox'
+        run: sudo apt-get install -y libgl1-mesa-dri libegl1 libglx-mesa0 xvfb
       - run: node scripts/check_web.mjs
         env:
           NODE_PATH: ${{ github.workspace }}/target/web-tools/node_modules
           WEB_BROWSER: ${{ matrix.browser }}
       - run: node scripts/check_web_features.mjs
+        if: matrix.browser != 'firefox'
         env:
           NODE_PATH: ${{ github.workspace }}/target/web-tools/node_modules
           WEB_BROWSER: ${{ matrix.browser }}
+      - name: Firefox WebGL and browser services
+        if: matrix.browser == 'firefox'
+        run: xvfb-run -a node scripts/check_web_features.mjs
+        env:
+          NODE_PATH: ${{ github.workspace }}/target/web-tools/node_modules
+          WEB_BROWSER: firefox
+          WEB_HEADLESS: '0'
+          LIBGL_ALWAYS_SOFTWARE: '1'
       - name: Build generated app for web
         run: |
           cargo run -p rusterize-cli -- new target/web-starter
