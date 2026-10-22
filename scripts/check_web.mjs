@@ -55,6 +55,7 @@ async function ready(page, name = 'rusterize') {
 }
 try {
   const context = await browser.newContext({ viewport: { width: 960, height: 680 } });
+  context.setDefaultTimeout(15000);
   const page = await context.newPage();
   page.on('pageerror', error => errors.push(String(error)));
   page.on('console', message => { if (message.type() === 'error' && !message.text().includes('404')) errors.push(message.text()); });
@@ -106,10 +107,13 @@ try {
   assert.ok(await page.evaluate(() => window.drawnText.some(t => t.includes('Ёж идёт'))));
   await page.screenshot({ path: resolve(out, `text-${engine}.png`) });
 
+  await page.setViewportSize({ width: 960, height: 680 });
   await page.goto(`${url}/checks.html`);
   await page.evaluate(async () => {
     const { start } = await import('/rusterize-gallery/rusterize.js');
     window.failures = [];
+    // Drag outside the canvas, but keep the pointer inside the browser viewport.
+    document.querySelector('canvas').style.width = '320px';
     window.app = await start(document.querySelector('canvas'), '/checks.wasm', { onError: e => window.failures.push(e.message) });
   });
   await ready(page, 'app');
@@ -137,6 +141,7 @@ try {
   assert.equal(await metric(14), 1); assert.equal(await metric(15), 1);
   await page.locator('canvas').dispatchEvent('wheel', { deltaY: 3, deltaMode: 1 });
   assert.equal(await metric(17), 120);
+  await page.locator('canvas').evaluate(canvas => { canvas.style.width = '100vw'; });
   await page.setViewportSize({ width: 700, height: 500 });
   await page.waitForFunction(() => window.testExports.web_check_metric(2) === 700);
   await page.keyboard.press('Enter');
@@ -187,6 +192,7 @@ try {
   await context.close();
 
   const mobile = await browser.newContext({ viewport: { width: 393, height: 852 }, deviceScaleFactor: 2, hasTouch: true });
+  mobile.setDefaultTimeout(15000);
   const touch = await mobile.newPage();
   touch.on('pageerror', e => errors.push(String(e)));
   await touch.goto(`${url}/rusterize-gallery/`);

@@ -2,7 +2,17 @@ name: Website
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'codex/**']
+    paths:
+      - 'examples/website/**'
+      - 'crates/**'
+      - 'hosts/web/**'
+      - 'scripts/build.py'
+      - 'scripts/build_website.py'
+      - 'scripts/check_website.mjs'
+      - 'Cargo.*'
+      - '.github/workflows/pages.yml'
+  pull_request:
     paths:
       - 'examples/website/**'
       - 'crates/**'
@@ -18,23 +28,24 @@ permissions:
   contents: read
 
 concurrency:
-  group: github-pages
+  group: github-pages-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
       - run: python scripts/build_website.py
@@ -43,7 +54,7 @@ jobs:
       - run: node scripts/check_website.mjs
         env:
           NODE_PATH: ${{ github.workspace }}/target/web-tools/node_modules
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: website-screenshots
@@ -52,8 +63,10 @@ jobs:
         with:
           path: dist/web/rusterize-website
   deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       pages: write
       id-token: write

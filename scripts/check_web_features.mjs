@@ -28,6 +28,7 @@ const url=`http://127.0.0.1:${server.address().port}`,engine=process.env.WEB_BRO
 const browser=await ({chromium,firefox,webkit}[engine]).launch({headless:true,...(process.env.WEB_CHANNEL?{channel:process.env.WEB_CHANNEL}:{})});
 try {
   const context=await browser.newContext({viewport:{width:760,height:540}}),page=await context.newPage(),errors=[];
+  context.setDefaultTimeout(15000);
   page.on('pageerror',e=>errors.push(String(e)));
   await page.addInitScript(()=>{
     const instantiate=WebAssembly.instantiate;

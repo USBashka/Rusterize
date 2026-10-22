@@ -27,6 +27,7 @@ let browser;
 try {
   browser = await browserType.launch({ headless: true, ...(process.env.WEB_CHANNEL ? { channel: process.env.WEB_CHANNEL } : {}) });
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, deviceScaleFactor: 1, reducedMotion: 'reduce', colorScheme: 'light' });
+  page.setDefaultTimeout(15000);
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
   page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
@@ -103,14 +104,17 @@ try {
     try { window.rusterize.callExport('rusterize_destroy', 0); return false; } catch { return true; }
   });
   assert.ok(denied);
-  assert.deepEqual(errors, [], 'Browser errors');
   await page.evaluate(() => window.rusterize.destroy());
   assert.ok(await page.evaluate(() => { try { window.rusterize.callExport('app_action', 0, 0); return false; } catch { return true; } }));
   const fallback = await browser.newPage({ javaScriptEnabled: false });
+  fallback.setDefaultTimeout(15000);
   await fallback.goto(url);
   assert.ok(await fallback.getByRole('heading', { level: 1 }).isVisible());
   assert.ok(await fallback.getByText('git clone', { exact: false }).isVisible());
   const mobile = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true, reducedMotion: 'reduce' });
+  mobile.setDefaultTimeout(15000);
+  mobile.on('pageerror', e => errors.push(e.message));
+  mobile.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
   await mobile.goto(url);
   await mobile.waitForFunction(() => window.rusterize?.frameCount > 0);
   await mobile.locator('[data-control="4"]').tap();
@@ -118,6 +122,7 @@ try {
   await mobile.getByRole('tab', { name: 'WGSL', exact: true }).tap();
   await mobile.screenshot({ path: resolve(out, 'mobile-2x.png') });
   assert.equal(await mobile.evaluate(() => window.rusterize.stopped), false);
+  assert.deepEqual(errors, [], 'Browser errors');
   console.log(`WEBSITE_OK ${url}; responsive, themes, tabs, slider, WGSL, clipboard, motion, export isolation, no-JS`);
 } finally {
   await browser?.close();
