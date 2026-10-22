@@ -134,13 +134,18 @@ jobs:
         run: python scripts/build.py --platform ${{ matrix.platform }} --package rusterize-shaders
       - name: Package WebView example
         run: python scripts/build.py --platform ${{ matrix.platform }} --package rusterize-webview
-      - name: Linux WebView lifecycle smoke
+      - name: Linux WebView lifecycle smoke (5 runs)
         if: runner.os == 'Linux'
-        run: xvfb-run -a dbus-run-session -- python scripts/check_native_webview.py dist/rusterize-webview
+        run: |
+          for attempt in {1..5}; do
+            echo "WebView lifecycle run ${attempt}/5"
+            xvfb-run -a dbus-run-session -- python scripts/check_native_webview.py dist/rusterize-webview
+          done
         env:
           GTK_A11Y: none
           GDK_BACKEND: x11
           LIBGL_ALWAYS_SOFTWARE: '1'
+          G_DEBUG: fatal-criticals
       - name: macOS WebView lifecycle smoke
         if: runner.os == 'macOS'
         run: python scripts/check_native_webview.py dist/rusterize-webview.app/Contents/MacOS/rusterize-webview

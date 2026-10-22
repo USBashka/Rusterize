@@ -20,7 +20,7 @@ static void web_free(gpointer data) {
     web_unref(e);
 }
 static void web_emit(WebEntry *e,uint32_t kind,uint32_t token,const char *value) {
-    if(!e->alive)return;
+    if(!e->alive || !service_app || service_app->closing)return;
     GByteArray *out=g_byte_array_new();put_u32(out,kind);put_u32(out,e->id);put_u32(out,token);put_string(out,value?value:"");
     g_queue_push_tail(&web_events,out);gtk_widget_queue_draw(service_app->area);
 }
@@ -110,9 +110,7 @@ static char *web_command(uint32_t op,Reader *r,GByteArray *out) {
     return NULL;
 }
 static void web_close(void) {
-    if(webviews){g_hash_table_destroy(webviews);webviews=NULL;}
-    g_queue_clear_full(&web_events,(GDestroyNotify)g_byte_array_unref);web_layer=NULL;
-}
-static gboolean web_window_closing(GtkWindow *window,gpointer data) {
-    (void)window;(void)data;web_close();return FALSE;
+    GHashTable *entries=webviews;webviews=NULL;web_layer=NULL;
+    if(entries)g_hash_table_destroy(entries);
+    g_queue_clear_full(&web_events,(GDestroyNotify)g_byte_array_unref);
 }
