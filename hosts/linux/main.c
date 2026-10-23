@@ -78,9 +78,9 @@ static void text_metrics(NativeText *t,GByteArray *out) {
 
 typedef struct {cairo_surface_t *surface;uint8_t *data;uint64_t generation;} Image;
 typedef struct {
-    uint64_t id,generation;GtkWidget *window,*area;GHashTable *images,*keys;guint tick;gint64 origin;
+    uint64_t id,generation;GtkWidget *window,*area;GHashTable *images,*keys;guint tick,schedule_source;gint64 origin;
     GtkCssProvider *chrome;uint32_t window_revision;
-    double pointer_x,pointer_y;uint32_t buttons;gboolean failed;
+    double pointer_x,pointer_y;uint32_t buttons;gboolean failed,closing;
 } App;
 
 static App *service_app;
@@ -100,7 +100,7 @@ static const uint8_t *native_service(const uint8_t *data,size_t len,size_t *size
         |1024
 #endif
     );
-    else if(!app || !app->window)error=g_strdup("No active native window");
+    else if(!app || !app->window || app->closing)error=g_strdup("No active native window");
 #ifdef RUSTERIZE_WEBVIEW
     else if(op==20 || op==21)error=web_command(op,&r,out);
 #endif
@@ -193,30 +193,49 @@ static gboolean replay(App *app,cairo_t *c,const uint8_t *data,size_t len) {
     return r.ok && balanced && r.p==r.end && cairo_status(c)==CAIRO_STATUS_SUCCESS;
 }
 static void schedule(App *app);
-static void event(App *app,uint32_t kind,float x,float y,float dx,float dy,uint32_t detail,uint32_t flags) {rusterize_event(app->id,kind,x,y,dx,dy,detail,flags);schedule(app);}
+static void event(App *app,uint32_t kind,float x,float y,float dx,float dy,uint32_t detail,uint32_t flags) {if(app->closing)return;rusterize_event(app->id,kind,x,y,dx,dy,detail,flags);schedule(app);}
+static void begin_close(App *app) {
+    if(app->closing)return;
+    app->closing=TRUE;
+    if(app->schedule_source){g_source_remove(app->schedule_source);app->schedule_source=0;}
+    if(app->tick){gtk_widget_remove_tick_callback(app->area,app->tick);app->tick=0;}
+#ifdef RUSTERIZE_WEBVIEW
+    web_close();
+#endif
+}
+static gboolean window_closing(GtkWindow *window,gpointer data) {
+    (void)window;App *app=data;begin_close(app);return FALSE;
+}
 static gboolean tick(GtkWidget *widget,GdkFrameClock *clock,gpointer ptr) {
-    (void)clock;App *app=ptr;uint32_t flags=rusterize_status(app->id);
+    (void)clock;App *app=ptr;if(app->closing){app->tick=0;return G_SOURCE_REMOVE;}uint32_t flags=rusterize_status(app->id);
     if(!(flags&RUSTERIZE_ANIMATE)){app->tick=0;return G_SOURCE_REMOVE;}
     gtk_widget_queue_draw(widget);return G_SOURCE_CONTINUE;
 }
-static void schedule(App *app) {
-    rusterize_poll_native(app->id);
+static gboolean scheduled(gpointer ptr) {
+    App *app=ptr;app->schedule_source=0;if(app->closing)return G_SOURCE_REMOVE;
+    if(!app->failed)rusterize_poll_native(app->id);
+    if(app->closing)return G_SOURCE_REMOVE;
     uint32_t flags=rusterize_status(app->id);
-    if(flags&RUSTERIZE_FAILED){app->failed=TRUE;g_printerr("Rusterize: %s\n",rusterize_error(app->id));gtk_window_close(GTK_WINDOW(app->window));return;}
-    if(flags&RUSTERIZE_EXIT){gtk_window_close(GTK_WINDOW(app->window));return;}
+    if(flags&RUSTERIZE_FAILED){app->failed=TRUE;g_printerr("Rusterize: %s\n",rusterize_error(app->id));}
+    if(app->failed || (flags&RUSTERIZE_EXIT)){begin_close(app);gtk_window_close(GTK_WINDOW(app->window));return G_SOURCE_REMOVE;}
     update_chrome(app);
     if(flags&RUSTERIZE_REDRAW)gtk_widget_queue_draw(app->area);
     if(flags&RUSTERIZE_ANIMATE){if(!app->tick)app->tick=gtk_widget_add_tick_callback(app->area,tick,app,NULL);}
     else if(app->tick){gtk_widget_remove_tick_callback(app->area,app->tick);app->tick=0;}
+    return G_SOURCE_REMOVE;
+}
+static void schedule(App *app) {
+    // Native commands and window teardown must run after GTK finishes snapshotting.
+    if(!app->closing && !app->schedule_source)app->schedule_source=g_idle_add(scheduled,app);
 }
 static void draw(GtkDrawingArea *area,cairo_t *c,int w,int h,gpointer ptr) {
-    App *app=ptr;uint32_t flags=rusterize_frame(app->id,w,h,gtk_widget_get_scale_factor(GTK_WIDGET(area)),(g_get_monotonic_time()-app->origin)/1e6);
+    App *app=ptr;if(app->closing)return;uint32_t flags=rusterize_frame(app->id,w,h,gtk_widget_get_scale_factor(GTK_WIDGET(area)),(g_get_monotonic_time()-app->origin)/1e6);
     if(flags&RUSTERIZE_FAILED){schedule(app);return;}
-    if(!replay(app,c,rusterize_data(app->id),rusterize_len(app->id))){app->failed=TRUE;g_printerr("Invalid Rusterize display list\n");gtk_window_close(GTK_WINDOW(app->window));return;}
+    if(!replay(app,c,rusterize_data(app->id),rusterize_len(app->id))){app->failed=TRUE;g_printerr("Invalid Rusterize display list\n");schedule(app);return;}
     schedule(app);
 }
 static uint32_t mouse_button(guint b){return b==1?1:b==3?2:b==2?4:0;}
-static void pressed(GtkGestureClick *gesture,int n,double x,double y,gpointer ptr){(void)n;App *a=ptr;uint32_t b=mouse_button(gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture)));a->buttons|=b;gtk_widget_grab_focus(a->area);event(a,1,x,y,0,0,0,a->buttons);}
+static void pressed(GtkGestureClick *gesture,int n,double x,double y,gpointer ptr){(void)n;App *a=ptr;if(a->closing)return;uint32_t b=mouse_button(gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture)));a->buttons|=b;gtk_widget_grab_focus(a->area);event(a,1,x,y,0,0,0,a->buttons);}
 static void released(GtkGestureClick *gesture,int n,double x,double y,gpointer ptr){(void)n;App *a=ptr;a->buttons&=~mouse_button(gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture)));event(a,3,x,y,0,0,0,a->buttons);}
 static void cancel(GtkGesture *gesture,GdkEventSequence *seq,gpointer ptr){(void)gesture;(void)seq;App *a=ptr;a->buttons=0;event(a,4,a->pointer_x,a->pointer_y,0,0,0,0);}
 static void motion(GtkEventControllerMotion *ctrl,double x,double y,gpointer ptr){(void)ctrl;App *a=ptr;a->pointer_x=x;a->pointer_y=y;event(a,2,x,y,0,0,0,a->buttons);}
@@ -232,6 +251,7 @@ static void unmapped(GtkWidget *widget,gpointer ptr){(void)widget;event(ptr,10,0
 static void activate(GtkApplication *gtk,gpointer ptr) {
     App *app=ptr;
     app->window=gtk_application_window_new(gtk);gtk_window_set_title(GTK_WINDOW(app->window),rusterize_title(app->id));gtk_window_set_default_size(GTK_WINDOW(app->window),window_float(app,0),window_float(app,1));gtk_window_set_resizable(GTK_WINDOW(app->window),rusterize_window_option(app->id,7)!=0);
+    g_signal_connect(app->window,"close-request",G_CALLBACK(window_closing),app);
     GtkWidget *header=gtk_header_bar_new();gtk_widget_add_css_class(header,"rusterize-chrome");gtk_window_set_titlebar(GTK_WINDOW(app->window),header);
     app->chrome=gtk_css_provider_new();gtk_style_context_add_provider_for_display(gtk_widget_get_display(app->window),GTK_STYLE_PROVIDER(app->chrome),GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);update_chrome(app);
     app->area=gtk_drawing_area_new();gtk_widget_set_size_request(app->area,window_float(app,2),window_float(app,3));gtk_widget_set_focusable(app->area,TRUE);gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(app->area),draw,app,NULL);gtk_window_set_child(GTK_WINDOW(app->window),app->area);
@@ -240,7 +260,6 @@ static void activate(GtkApplication *gtk,gpointer ptr) {
     GtkWidget *overlay=gtk_overlay_new();gtk_overlay_set_child(GTK_OVERLAY(overlay),app->area);g_object_unref(app->area);
     web_layer=gtk_fixed_new();gtk_widget_set_can_target(web_layer,FALSE);gtk_overlay_add_overlay(GTK_OVERLAY(overlay),web_layer);
     gtk_window_set_child(GTK_WINDOW(app->window),overlay);
-    g_signal_connect(app->window,"close-request",G_CALLBACK(web_window_closing),NULL);
 #endif
     GtkGesture *click=gtk_gesture_click_new();gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click),0);g_signal_connect(click,"pressed",G_CALLBACK(pressed),app);g_signal_connect(click,"released",G_CALLBACK(released),app);g_signal_connect(click,"cancel",G_CALLBACK(cancel),app);gtk_widget_add_controller(app->area,GTK_EVENT_CONTROLLER(click));
     GtkEventController *move=gtk_event_controller_motion_new();g_signal_connect(move,"motion",G_CALLBACK(motion),app);gtk_widget_add_controller(app->area,move);
@@ -262,9 +281,7 @@ int main(int argc,char **argv) {
     GtkApplication *gtk=gtk_application_new("dev.rusterize.app",G_APPLICATION_NON_UNIQUE);g_signal_connect(gtk,"activate",G_CALLBACK(activate),&app);
     int app_argc=(argc==2 && strcmp(argv[1],"--smoke")==0)?1:argc;
     int code=g_application_run(G_APPLICATION(gtk),app_argc,argv);
-#ifdef RUSTERIZE_WEBVIEW
-    web_close();
-#endif
+    begin_close(&app);app.window=NULL;app.area=NULL;
     if(app.chrome){GdkDisplay *display=gdk_display_get_default();if(display)gtk_style_context_remove_provider_for_display(display,GTK_STYLE_PROVIDER(app.chrome));g_object_unref(app.chrome);}
     g_object_unref(gtk);g_hash_table_destroy(app.images);g_hash_table_destroy(app.keys);rusterize_destroy(app.id);return app.failed?1:code;
 }

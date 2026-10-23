@@ -25,10 +25,12 @@ const server=createServer(async(req,res)=>{
 });
 await new Promise(done=>server.listen(0,'127.0.0.1',done));
 const url=`http://127.0.0.1:${server.address().port}`,engine=process.env.WEB_BROWSER||'chromium';
-const browser=await ({chromium,firefox,webkit}[engine]).launch({headless:true,...(process.env.WEB_CHANNEL?{channel:process.env.WEB_CHANNEL}:{})});
+const browser=await ({chromium,firefox,webkit}[engine]).launch({headless:process.env.WEB_HEADLESS!=='0',...(process.env.WEB_CHANNEL?{channel:process.env.WEB_CHANNEL}:{})});
 try {
-  const context=await browser.newContext({viewport:{width:760,height:540}}),page=await context.newPage(),errors=[];
+  const context=await browser.newContext({viewport:{width:760,height:540}}),page=await context.newPage(),errors=[],messages=[];
+  context.setDefaultTimeout(15000);
   page.on('pageerror',e=>errors.push(String(e)));
+  page.on('console',message=>{if(['error','warning'].includes(message.type())) messages.push(message.text());});
   await page.addInitScript(()=>{
     const instantiate=WebAssembly.instantiate;
     WebAssembly.instantiate=async(...args)=>{const result=await instantiate(...args);window.testExports=(result.instance??result).exports;return result;};
@@ -37,8 +39,19 @@ try {
     CanvasRenderingContext2D.prototype.fillText=function(text,...args){window.drawnText.push(text);return fillText.call(this,text,...args);};
   });
   await page.goto(`${url}/rusterize-shaders/`);
-  await page.waitForFunction(()=>window.drawnText.includes('WGSL') || window.rusterize?.stopped || window.drawnText.length>5);
-  assert.ok(await page.evaluate(()=>window.drawnText.includes('WGSL')),JSON.stringify(await page.evaluate(()=>window.drawnText)));
+  await page.bringToFront();
+  try {
+    await page.waitForFunction(()=>window.rusterize?.frameCount>0 || window.rusterize?.stopped ||
+      (document.querySelector('#error') && !document.querySelector('#error').hidden),undefined,{polling:50});
+    assert.ok(await page.evaluate(()=>window.drawnText.includes('WGSL')),'Shader did not render WGSL');
+  } catch(error) {
+    console.error('Shader startup diagnostics:',await page.evaluate(()=>({
+      visibility:document.visibilityState,frames:window.rusterize?.frameCount,stopped:window.rusterize?.stopped,
+      text:window.drawnText,error:document.querySelector('#error')?.textContent,
+    })),{errors,messages});
+    await page.screenshot({path:resolve(out,`shaders-failure-${engine}.png`)}).catch(()=>{});
+    throw error;
+  }
   await page.waitForFunction(()=>window.rusterize.frameCount>3);
   const pixels=await page.evaluate(()=>Array.from(document.querySelector('canvas').getContext('2d').getImageData(150,150,2,2).data));
   assert.ok(pixels.some((v,i)=>i%4!==3 && v>50),'shader must draw real colors');

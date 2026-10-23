@@ -17,22 +17,23 @@ jobs:
   web:
     name: Web (${{ matrix.browser }})
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         browser: [chromium, firefox, webkit]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
           components: clippy
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - run: python scripts/build.py --platform web
@@ -44,20 +45,32 @@ jobs:
       - run: cargo clippy --target wasm32-unknown-unknown -p rusterize-gallery -p rusterize-native-api -p rusterize-shaders -p rusterize-webview --lib --examples --locked -- -D warnings
       - run: npm install --prefix target/web-tools --no-save playwright@1.62.1
       - run: npx --prefix target/web-tools playwright install --with-deps ${{ matrix.browser }}
+      - name: Software OpenGL for Firefox
+        if: matrix.browser == 'firefox'
+        run: sudo apt-get install -y libgl1-mesa-dri libegl1 libglx-mesa0 xvfb
       - run: node scripts/check_web.mjs
         env:
           NODE_PATH: ${{ github.workspace }}/target/web-tools/node_modules
           WEB_BROWSER: ${{ matrix.browser }}
       - run: node scripts/check_web_features.mjs
+        if: matrix.browser != 'firefox'
         env:
           NODE_PATH: ${{ github.workspace }}/target/web-tools/node_modules
           WEB_BROWSER: ${{ matrix.browser }}
+      - name: Firefox WebGL and browser services
+        if: matrix.browser == 'firefox'
+        run: xvfb-run -a node scripts/check_web_features.mjs
+        env:
+          NODE_PATH: ${{ github.workspace }}/target/web-tools/node_modules
+          WEB_BROWSER: firefox
+          WEB_HEADLESS: '0'
+          LIBGL_ALWAYS_SOFTWARE: '1'
       - name: Build generated app for web
         run: |
           cargo run -p rusterize-cli -- new target/web-starter
           cd target/web-starter
           python scripts/build.py --platform web
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: rusterize-web-${{ matrix.browser }}
@@ -67,6 +80,7 @@ jobs:
 
   native:
     name: Native (${{ matrix.platform }})
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -79,18 +93,31 @@ jobs:
             platform: macos
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Linux system libraries
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libpango1.0-dev libegl1-mesa-dev libgl1-mesa-dri libwebkitgtk-6.0-dev xvfb pkg-config
+      - name: Allow WebKit sandbox namespaces on Ubuntu
+        if: runner.os == 'Linux'
+        run: |
+          # Ubuntu 24.04 restricts unprivileged user namespaces. Permit only bwrap
+          # on this ephemeral runner, keeping WebKit's process sandbox enabled.
+          sudo apparmor_parser -r <<'PROFILE'
+          abi <abi/4.0>,
+          profile bwrap /usr/bin/bwrap flags=(unconfined) {
+            userns,
+          }
+          PROFILE
+      - name: Test smoke runner
+        run: python -m unittest discover -s scripts -p "test_*.py"
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
@@ -107,15 +134,24 @@ jobs:
         run: python scripts/build.py --platform ${{ matrix.platform }} --package rusterize-shaders
       - name: Package WebView example
         run: python scripts/build.py --platform ${{ matrix.platform }} --package rusterize-webview
-      - name: Linux WebView lifecycle smoke
+      - name: Linux WebView lifecycle smoke (5 runs)
         if: runner.os == 'Linux'
-        run: xvfb-run -a dist/rusterize-webview --smoke
+        run: |
+          for attempt in {1..5}; do
+            echo "WebView lifecycle run ${attempt}/5"
+            xvfb-run -a dbus-run-session -- python scripts/check_native_webview.py dist/rusterize-webview
+          done
+        env:
+          GTK_A11Y: none
+          GDK_BACKEND: x11
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          G_DEBUG: fatal-criticals
       - name: macOS WebView lifecycle smoke
         if: runner.os == 'macOS'
-        run: dist/rusterize-webview.app/Contents/MacOS/rusterize-webview --smoke
+        run: python scripts/check_native_webview.py dist/rusterize-webview.app/Contents/MacOS/rusterize-webview
       - name: Windows WebView lifecycle smoke
         if: runner.os == 'Windows'
-        run: python -c "import subprocess; r=subprocess.run(['dist/webview.exe','--smoke'],capture_output=True,text=True,timeout=45); print(r.stdout,r.stderr); assert r.returncode==0 and 'WEBVIEW_SMOKE_OK' in r.stdout"
+        run: python scripts/check_native_webview.py dist/webview.exe
       - name: Linux WGSL snapshot
         if: runner.os == 'Linux'
         run: dist/rusterize-shaders --snapshot dist/shaders-linux.png
@@ -161,7 +197,8 @@ jobs:
         run: cargo run -p rusterize-cli -- new target/ci-app
       - name: Check generated app
         run: cargo check --manifest-path target/ci-app/Cargo.toml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
+        if: always()
         with:
           name: rusterize-${{ matrix.platform }}
           path: dist/
@@ -170,14 +207,15 @@ jobs:
   android:
     name: Android (ARM64 and x86-64)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android, x86_64-linux-android
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -195,7 +233,7 @@ jobs:
         run: python3 scripts/build.py --platform android --package rusterize-shaders --ndk "$ANDROID_HOME/ndk/27.2.12479018" --abi arm64-v8a --abi x86_64
       - name: Build WebView example
         run: python3 scripts/build.py --platform android --package rusterize-webview --ndk "$ANDROID_HOME/ndk/27.2.12479018" --abi arm64-v8a --abi x86_64
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: rusterize-android
           path: dist/*.apk
@@ -204,8 +242,9 @@ jobs:
   core-msrv:
     name: Core (Rust 1.85)
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.85.0
