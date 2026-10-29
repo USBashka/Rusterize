@@ -15,24 +15,26 @@ import android.view.*;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
-import java.util.HashSet;
 
 /** Thin UI-thread host. Application state and display lists are produced by Rust. */
 public final class RusterizeView extends View implements AutoCloseable {
     static { System.loadLibrary("rusterize_app"); }
-    private static native long nativeCreate();
+    private static native long nativeCreate(Context context);
     private static native int nativePoll(long id);
     private static native void nativeDraw(long id,Canvas canvas,View view);
     private static WeakReference<RusterizeView> active = new WeakReference<>(null);
     private static native void nativeDestroy(long id);
+    private static native int nativeResetResources(long id);
     private static native int nativeStatus(long id);
     private static native int nativeOption(long id,int option);
     private static native String nativeTitle(long id);
     private static native int nativeEvent(long id, int kind, float x, float y, float dx, float dy, int detail, int flags);
     private static native byte[] nativeFrame(long id, float w, float h, float scale, double seconds);
-    private long handle = nativeCreate();
+    private long handle;
     private boolean suspended;
     private final NativeWebViews webviews;
+    private final NativeFiles files;
+    private final NativeAudio audio;
     private int windowRevision;
     private Integer originalStatus,originalNavigation,originalFlags,originalRootColor;
     private final long origin = System.nanoTime();
@@ -43,12 +45,14 @@ public final class RusterizeView extends View implements AutoCloseable {
     private final float[] matrixValues = new float[9];
     private float shapeRadius;
     private final LongSparseArray<Bitmap> bitmaps = new LongSparseArray<>();
-    private final HashSet<Long> usedImages = new HashSet<>();
+    private final NativeShaders shaders = NativeShaders.enabled ? new NativeShaders() : null;
     public RusterizeView(Context context) {
         super(context); active = new WeakReference<>(this); setFocusable(true); setFocusableInTouchMode(true);
+        files=new NativeFiles(this);audio=new NativeAudio(this);
         webviews = new NativeWebViews(this, new Runnable() {
             @Override public void run() { if(handle!=0)schedule(nativeStatus(handle)); }
         });
+        handle=nativeCreate(context.getApplicationContext());
         paint.setStrokeCap(Paint.Cap.BUTT); paint.setStrokeJoin(Paint.Join.MITER); paint.setStrokeMiter(10);
     }
     private float density() { return getResources().getDisplayMetrics().density; }
@@ -81,13 +85,25 @@ public final class RusterizeView extends View implements AutoCloseable {
     private void event(int kind, float x, float y, float dx, float dy, int detail, int flags) {
         if (handle != 0) schedule(nativeEvent(handle, kind, x, y, dx, dy, detail, flags));
     }
-    public void resume() { suspended = false; webviews.resume(); event(11,0,0,0,0,0,0); }
-    public void suspend() { suspended = true; webviews.suspend(); event(10,0,0,0,0,0,0); }
+    public void resume() { suspended = false; windowRevision=0; webviews.resume(); event(11,0,0,0,0,0,0); }
+    public void suspend() { suspended = true; audio.release(); webviews.suspend(); event(10,0,0,0,0,0,0); resetResources(); }
+    void wakeServices(){if(handle!=0)schedule(nativeStatus(handle));}
+    void documentResult(int result,Intent data){files.result(result,data);}
+    void audioInterrupted(){event(12,0,0,0,0,0,0);}
+    public static byte[] fileService(byte[] data){return NativeFiles.execute(data);}
+    public void resetResources() {
+        if(handle==0)return;
+        bitmaps.clear();
+        if(shaders!=null)shaders.close();
+        schedule(nativeResetResources(handle));
+    }
     @Override public void close() {
+        files.close();audio.release();
         webviews.close();
         if (handle != 0) { nativeDestroy(handle); handle = 0; }
         // Hardware display lists may still reference a bitmap until the next render pass.
         bitmaps.clear();
+        if(shaders!=null)shaders.close();
     }
     @Override protected void onDraw(Canvas canvas) {
         if (handle == 0 || suspended) return;
@@ -149,8 +165,34 @@ public final class RusterizeView extends View implements AutoCloseable {
         else c.drawPath(path,paint);
     }
     private void replay(Canvas c, ByteBuffer b) {
-        if (b.getInt()!=0x32305a52) throw new IllegalStateException("Unsupported Rusterize protocol");
-        int count=b.getInt(),depth=0; usedImages.clear();
+        if (b.remaining()<12 || b.getInt()!=0x33305a52) throw new IllegalStateException("Unsupported Rusterize protocol");
+        int resources=b.getInt();
+        if(resources<0)throw new IllegalStateException("Invalid resource count");
+        for(int i=0;i<resources;i++) {
+            int opcode=b.getInt();long id=b.getLong();
+            if(opcode==1) {
+                int width=b.getInt(),height=b.getInt(),len=b.getInt();
+                if(width<=0 || height<=0 || len<0 || (long)width*height!=len/4L || len%4!=0 || len>b.remaining())throw new IllegalStateException("Invalid image dimensions");
+                if(shaders!=null) {
+                    byte[] rgba=new byte[len];ByteBuffer copy=b.duplicate();copy.get(rgba);
+                    shaders.uploadImage(id,width,height,rgba);
+                }
+                int[] pixels=new int[len/4];for(int p=0;p<pixels.length;p++)pixels[p]=rgba(b);
+                Bitmap bitmap=Bitmap.createBitmap(pixels,width,height,Bitmap.Config.ARGB_8888);
+                // Existing display lists may still retain the previous bitmap.
+                bitmaps.put(id,bitmap);
+            } else if(opcode==2){bitmaps.remove(id);if(shaders!=null)shaders.releaseImage(id);}
+            else if(opcode==3) {
+                if(shaders==null)throw new IllegalStateException("Shader feature unavailable");
+                shaders.uploadSource(id,string(b),string(b),string(b),string(b));
+            } else if(opcode==4) {
+                if(shaders==null)throw new IllegalStateException("Shader feature unavailable");
+                shaders.releaseSource(id);
+            }
+            else throw new IllegalStateException("Unknown resource command");
+        }
+        int count=b.getInt(),depth=0;
+        if(count<0)throw new IllegalStateException("Invalid drawing command count");
         for (int i=0;i<count;i++) {
             int opcode=b.getInt();switch (opcode) {
                 case 1: c.drawColor(rgba(b),PorterDuff.Mode.SRC); break;
@@ -169,20 +211,24 @@ public final class RusterizeView extends View implements AutoCloseable {
                     int save=c.save();c.translate(x+t.offsetX,y-(opcode==8?t.layout.getLineBaseline(0):0));t.layout.draw(c);c.restoreToCount(save);break;
                 }
                 case 9:
-                    long id=b.getLong();int width=b.getInt(),height=b.getInt();rectangle(b);float opacity=b.getFloat();int len=b.getInt();
-                    if(len!=(long)width*height*4)throw new IllegalStateException("Invalid image dimensions");
+                    long id=b.getLong();rectangle(b);float opacity=b.getFloat();
                     Bitmap bitmap=bitmaps.get(id);
-                    if(bitmap==null) {
-                        int[] pixels=new int[width*height];for(int p=0;p<pixels.length;p++)pixels[p]=rgba(b);
-                        bitmap=Bitmap.createBitmap(pixels,width,height,Bitmap.Config.ARGB_8888);bitmaps.put(id,bitmap);
-                    } else b.position(b.position()+len);
-                    usedImages.add(id);paint.setShader(null);paint.setColor(Color.WHITE);paint.setAlpha(Math.round(opacity*255));
+                    if(bitmap==null)throw new IllegalStateException("Unknown image resource");
+                    paint.setShader(null);paint.setColor(Color.WHITE);paint.setAlpha(Math.round(opacity*255));
                     c.drawBitmap(bitmap,null,rect,paint);break;
+                case 11: {
+                    if(shaders==null)throw new IllegalStateException("Shader feature unavailable");
+                    long source=b.getLong();float[] values=new float[20];
+                    for(int value=0;value<values.length;value++)values[value]=b.getFloat();
+                    long input=b.getLong();rectangle(b);
+                    Bitmap rendered=shaders.render(c,source,values,input);
+                    paint.setShader(null);paint.setColor(Color.WHITE);paint.setAlpha(255);
+                    c.drawBitmap(rendered,null,rect,paint);break;
+                }
                 default:throw new IllegalStateException("Unknown drawing command");
             }
         }
         if(depth!=0 || b.hasRemaining())throw new IllegalStateException("Invalid display-list length");
-        for(int i=bitmaps.size()-1;i>=0;i--)if(!usedImages.contains(bitmaps.keyAt(i)))bitmaps.removeAt(i);
     }
 
     private static String string(ByteBuffer b) {byte[] data=new byte[b.getInt()];b.get(data);return new String(data,StandardCharsets.UTF_8);}
@@ -226,10 +272,19 @@ public final class RusterizeView extends View implements AutoCloseable {
             ByteBuffer b=ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);int op=b.getInt();
             integer(out,0);
             if(op==1){raw(out,new NativeText(b).metrics());return out.toByteArray();}
-            if(op==2){integer(out,1|2|4|256|512|NativeWebViews.CAPABILITY);return out.toByteArray();}
+            if(op==2){integer(out,1|2|4|8|128|256|512|NativeWebViews.CAPABILITY);return out.toByteArray();}
             RusterizeView view=active.get();if(view==null)throw new IllegalStateException("No active native view");
             Context context=view.getContext();
             switch(op) {
+                case 60: case 61: case 63: raw(out,view.files.command(op,b));break;
+                case 62: view.audio.acquire();break;
+                case 6: {
+                    int state=b.getInt();if(!(context instanceof Activity))throw new IllegalStateException("No activity");
+                    Window window=((Activity)context).getWindow();
+                    if(state!=0&&state!=3)throw new UnsupportedOperationException("Android supports Normal and Fullscreen only");
+                    if(android.os.Build.VERSION.SDK_INT>=30){android.view.WindowInsetsController control=window.getInsetsController();if(control==null)throw new IllegalStateException("Window insets controller unavailable");if(state==3){control.setSystemBarsBehavior(android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);control.hide(WindowInsets.Type.systemBars());}else control.show(WindowInsets.Type.systemBars());}
+                    else{int flags=window.getDecorView().getSystemUiVisibility();int mask=View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_HIDE_NAVIGATION|View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;window.getDecorView().setSystemUiVisibility(state==3?flags|mask:flags&~mask);}break;
+                }
                 case 20: case 21: raw(out,view.webviews.command(op,b));break;
                 case 3: {
                     ClipboardManager clipboard=(ClipboardManager)context.getSystemService(Context.CLIPBOARD_SERVICE);

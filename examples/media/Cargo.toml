@@ -1,0 +1,19 @@
+[package]
+name = "rusterize-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "media"
+path = "src/main.rs"
+
+[features]
+default = ["bundled-media"]
+bundled-media = []
+
+[dependencies]
+rusterize = { path = "../../crates/rusterize", features = ["media"] }

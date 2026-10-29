@@ -14,15 +14,27 @@
 //! ```
 
 mod app;
+#[cfg(feature = "audio")]
+pub mod audio;
 mod canvas;
+#[cfg(feature = "files")]
+pub mod files;
 mod geometry;
 pub mod host;
+#[cfg(feature = "image-codecs")]
+pub mod images;
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "audio", feature = "files", feature = "image-codecs")
+))]
+mod jobs;
 pub mod native;
 mod paint;
 pub mod protocol;
 #[cfg(feature = "shaders")]
 pub mod shader;
 mod text;
+pub mod time;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub mod web;
 #[cfg(feature = "webview")]

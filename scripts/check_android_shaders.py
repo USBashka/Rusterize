@@ -12,6 +12,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--adb', default='adb')
 parser.add_argument('--serial', required=True)
 parser.add_argument('--apk', type=Path)
+parser.add_argument('--package', default='dev.rusterize.rusterizeshaders')
 parser.add_argument('--output', type=Path, default=Path('target/shader-work/android'))
 args = parser.parse_args()
 if not args.serial.startswith('emulator-'):
@@ -33,7 +34,7 @@ def frame():
     assert len(set(pixels)) > 20, 'No visible shader gradient'
     return width, height, hashlib.sha256(pixels).hexdigest()
 
-package = 'dev.rusterize.rusterizeshaders'
+package = args.package
 activity = package + '/dev.rusterize.MainActivity'
 if args.apk:
     adb('install', '-r', args.apk)

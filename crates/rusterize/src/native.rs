@@ -64,6 +64,12 @@ pub struct FileDialog {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum NativeRequest {
+    #[cfg(feature = "files")]
+    Files(crate::files::FileRequest),
+    #[cfg(feature = "image-codecs")]
+    DecodeImage(Vec<u8>),
+    #[cfg(feature = "audio")]
+    DecodeAudio(Vec<u8>),
     /// Browser file token returned by the picker; never a system filesystem path.
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     BrowserFile(crate::web::FileRequest),
@@ -88,8 +94,15 @@ pub enum NativeRequest {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NativeResponse {
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     Bytes(Vec<u8>),
+    #[cfg(feature = "files")]
+    Files(Vec<crate::files::FileLocation>),
+    /// The storage key has never been written; distinct from empty data.
+    Missing,
+    #[cfg(feature = "image-codecs")]
+    Image(crate::Image),
+    #[cfg(feature = "audio")]
+    Audio(crate::audio::Clip),
     Done,
     Text(String),
     Paths(Vec<std::path::PathBuf>),
@@ -113,16 +126,57 @@ impl NativeCapabilities {
     pub const OPEN_URI: u32 = 512;
     /// The host was built with WebView support; runtime availability is checked on creation.
     pub const WEBVIEW: u32 = 1024;
+    pub const AUDIO: u32 = 2048;
+    pub const IMAGE_CODECS: u32 = 4096;
+    pub const FILE_IO: u32 = 8192;
+    pub const STORAGE: u32 = 16384;
     pub fn supports(self, features: u32) -> bool {
         self.0 & features == features
     }
 }
 pub fn capabilities() -> NativeCapabilities {
-    query(&2u32.to_le_bytes())
+    let capabilities = query(&2u32.to_le_bytes())
         .ok()
         .and_then(|v| Reader::new(&v).u32().ok())
         .map(NativeCapabilities)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    #[cfg(not(target_arch = "wasm32"))]
+    let capabilities = NativeCapabilities(
+        capabilities.0
+            | if cfg!(feature = "audio") {
+                NativeCapabilities::AUDIO
+            } else {
+                0
+            }
+            | if cfg!(feature = "image-codecs") {
+                NativeCapabilities::IMAGE_CODECS
+            } else {
+                0
+            }
+            | if cfg!(feature = "files") {
+                NativeCapabilities::FILE_IO | NativeCapabilities::STORAGE
+            } else {
+                0
+            },
+    );
+    NativeCapabilities(
+        capabilities.0
+            & if cfg!(feature = "audio") {
+                u32::MAX
+            } else {
+                !NativeCapabilities::AUDIO
+            }
+            & if cfg!(feature = "image-codecs") {
+                u32::MAX
+            } else {
+                !NativeCapabilities::IMAGE_CODECS
+            }
+            & if cfg!(feature = "files") {
+                u32::MAX
+            } else {
+                !(NativeCapabilities::FILE_IO | NativeCapabilities::STORAGE)
+            },
+    )
 }
 
 type Service = Rc<dyn Fn(&[u8]) -> Result<Vec<u8>, Error>>;
@@ -162,6 +216,22 @@ pub(crate) fn query(request: &[u8]) -> Result<Vec<u8>, Error> {
 pub(crate) fn encode_request(request: &NativeRequest) -> Result<Vec<u8>, Error> {
     let mut w = crate::protocol::Writer(Vec::new());
     match request {
+        #[cfg(feature = "files")]
+        NativeRequest::Files(request) => crate::files::encode(request, &mut w)?,
+        #[cfg(feature = "image-codecs")]
+        NativeRequest::DecodeImage(bytes) => {
+            if bytes.len() > crate::images::MAX_ENCODED_BYTES {
+                return Err(Error("image source exceeds 32 MiB".into()));
+            }
+            w.u32(50);
+            w.bytes(bytes);
+        }
+        #[cfg(feature = "audio")]
+        NativeRequest::DecodeAudio(bytes) => {
+            crate::audio::validate_source(bytes)?;
+            w.u32(51);
+            w.bytes(bytes);
+        }
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         NativeRequest::BrowserFile(request) => crate::web::encode_file(request, &mut w)?,
         #[cfg(feature = "webview")]
@@ -240,6 +310,19 @@ pub(crate) fn decode_response(
     result: Vec<u8>,
 ) -> Result<NativeResponse, Error> {
     match request {
+        #[cfg(feature = "files")]
+        NativeRequest::Files(request) => crate::files::decode(request, result),
+        #[cfg(feature = "image-codecs")]
+        NativeRequest::DecodeImage(_) => {
+            let mut r = Reader::new(&result);
+            let width = r.u32()?;
+            let height = r.u32()?;
+            crate::Image::rgba(width, height, result[8..].to_vec()).map(NativeResponse::Image)
+        }
+        #[cfg(feature = "audio")]
+        NativeRequest::DecodeAudio(_) => {
+            crate::audio::decode_browser_response(&result).map(NativeResponse::Audio)
+        }
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         NativeRequest::BrowserFile(request) => crate::web::decode_file(request, result),
         NativeRequest::ReadClipboard => Ok(NativeResponse::Text(

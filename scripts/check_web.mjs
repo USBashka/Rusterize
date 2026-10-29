@@ -128,6 +128,10 @@ try {
   assert.deepEqual(pixels.slice(0,8), [[255,0,0,255],[0,255,0,255],[0,0,0,0],[0,0,255,255],[0,0,0,0],[255,255,0,255],[0,255,255,255],[0,0,0,255]]);
   assert.ok(pixels[8][0] < 40 && pixels[9][0] > 220, 'gradient endpoints');
   assert.deepEqual(pixels[10], [255,0,255,128], 'RGBA and opacity');
+  const beforeReset=await page.evaluate(()=>window.app.frameCount);
+  await page.evaluate(()=>window.app.resetResources());
+  await page.waitForFunction(n=>window.app.frameCount>n,beforeReset);
+  assert.deepEqual(await page.evaluate(()=>[...document.querySelector('canvas').getContext('2d').getImageData(40,40,1,1).data]),[255,0,255,128],'reset reloads bitmap resources');
   await page.mouse.move(10, 10); await page.mouse.down(); await page.mouse.move(450, 20); await page.mouse.up();
   assert.equal(await metric(5), 1); assert.equal(await metric(7), 1);
   assert.equal(await metric(9), 0); assert.equal(await metric(10), 450);

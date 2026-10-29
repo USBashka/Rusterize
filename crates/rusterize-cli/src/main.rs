@@ -45,6 +45,22 @@ fn main() {
 "#;
 const FILES: &[(&str, &str)] = &[
     (
+        "hosts/web/media.js",
+        include_str!("../../../hosts/web/media.js"),
+    ),
+    (
+        "hosts/web/media-worker.js",
+        include_str!("../../../hosts/web/media-worker.js"),
+    ),
+    (
+        "hosts/android/java/dev/rusterize/NativeFiles.java",
+        include_str!("../../../hosts/android/java/dev/rusterize/NativeFiles.java"),
+    ),
+    (
+        "hosts/android/java/dev/rusterize/NativeAudio.java",
+        include_str!("../../../hosts/android/java/dev/rusterize/NativeAudio.java"),
+    ),
+    (
         "hosts/web/wire.js",
         include_str!("../../../hosts/web/wire.js"),
     ),
@@ -118,15 +134,40 @@ const FILES: &[(&str, &str)] = &[
         include_str!("../../../hosts/android/java/dev/rusterize/RusterizeView.java"),
     ),
     (
+        "hosts/android/java/dev/rusterize/NativeShaders.java",
+        include_str!("../../../hosts/android/java/dev/rusterize/NativeShaders.java"),
+    ),
+    (
         "hosts/linux/main.c",
         include_str!("../../../hosts/linux/main.c"),
+    ),
+    (
+        "hosts/linux/gpu.h",
+        include_str!("../../../hosts/linux/gpu.h"),
     ),
     (
         "hosts/macos/main.swift",
         include_str!("../../../hosts/macos/main.swift"),
     ),
+    (
+        "hosts/macos/gpu.swift",
+        include_str!("../../../hosts/macos/gpu.swift"),
+    ),
     ("SKILL.md", include_str!("../../../SKILL.md")),
     ("docs/API.md", include_str!("../../../docs/API.md")),
+    ("docs/MEDIA.md", include_str!("../../../docs/MEDIA.md")),
+    (
+        "docs/MEDIA_LICENSES.md",
+        include_str!("../../../docs/MEDIA_LICENSES.md"),
+    ),
+    (
+        "docs/MEDIA_VALIDATION.md",
+        include_str!("../../../docs/MEDIA_VALIDATION.md"),
+    ),
+    (
+        "docs/LYRIXX_MIGRATION.md",
+        include_str!("../../../docs/LYRIXX_MIGRATION.md"),
+    ),
     ("docs/SHADERS.md", include_str!("../../../docs/SHADERS.md")),
     (
         "docs/NATIVE_API.md",

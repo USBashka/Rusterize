@@ -162,6 +162,7 @@ func nativeService(_ data:UnsafePointer<UInt8>?,_ count:Int,_ length:UnsafeMutab
                 let index=Int(try r.u32());guard index<cursors.count else {throw WireError.malformed};view.serviceCursor=cursors[index];window.invalidateCursorRects(for:view);view.serviceCursor.set()
             case 6:
                 let state=try r.u32(),fullscreen=window.styleMask.contains(.fullScreen)
+                guard state<=3 else {throw WireError.native("Unknown window state")}
                 if (state==3) != fullscreen {window.toggleFullScreen(nil)}
                 if state==0 {window.deminiaturize(nil);if window.isZoomed {window.zoom(nil)}}
                 else if state==1 {window.miniaturize(nil)}
@@ -185,6 +186,10 @@ func nativeService(_ data:UnsafePointer<UInt8>?,_ count:Int,_ length:UnsafeMutab
 }
 
 final class RusterizeView: NSView {
+    #if RUSTERIZE_SHADERS
+    private var gpuView: GPUCanvasView!
+    private var activeGPU: MacGPU?
+    #endif
     #if RUSTERIZE_WEBVIEW
     lazy var webviews = NativeWebViews(self)
     #endif
@@ -201,7 +206,13 @@ final class RusterizeView: NSView {
     override func resetCursorRects() {addCursorRect(bounds,cursor:serviceCursor)}
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
-    override init(frame: NSRect) { super.init(frame:frame); wantsLayer = false; nativeView = self }
+    override init(frame: NSRect) {
+        super.init(frame:frame); wantsLayer = false; nativeView = self
+        #if RUSTERIZE_SHADERS
+        gpuView = GPUCanvasView(frame:bounds); gpuView.owner = self
+        addSubview(gpuView,position:.below,relativeTo:nil)
+        #endif
+    }
     required init?(coder: NSCoder) { fatalError("Use init(frame:)") }
     deinit { timer?.invalidate(); rusterize_destroy(handle) }
     func event(_ kind: UInt32, _ x: CGFloat = 0, _ y: CGFloat = 0, _ dx: CGFloat = 0, _ dy: CGFloat = 0, _ detail: UInt32 = 0, _ flags: UInt32 = 0) {
@@ -212,15 +223,30 @@ final class RusterizeView: NSView {
         if status & 0x80000000 != 0 { fail(String(cString:rusterize_error(handle))); return }
         if status & 4 != 0 { window?.close(); return }
         updateChrome()
-        if status & 1 != 0 { needsDisplay = true }
+        if status & 1 != 0 { requestDisplay() }
         if status & 2 != 0 {
             if timer == nil {
-                let created = Timer(timeInterval:1.0/60.0,repeats:true) { [weak self] _ in self?.needsDisplay = true }
+                let created = Timer(timeInterval:1.0/60.0,repeats:true) { [weak self] _ in self?.requestDisplay() }
                 timer = created; RunLoop.main.add(created,forMode:.common)
             }
         } else { timer?.invalidate(); timer = nil }
     }
+    private func requestDisplay() {
+        #if RUSTERIZE_SHADERS
+        gpuView.needsDisplay = true
+        #else
+        needsDisplay = true
+        #endif
+    }
     func pollNative() { schedule() }
+    func resetResources() {
+        images.removeAll()
+        #if RUSTERIZE_SHADERS
+        do { try gpuView.resetResources() } catch { fail("GPU resource reset: \(error)") }
+        #endif
+        _ = rusterize_reset_resources(handle)
+        schedule()
+    }
     func updateChrome() {
         guard let window = window else {return}
         let revision = rusterize_window_option(handle,8)
@@ -236,29 +262,117 @@ final class RusterizeView: NSView {
         FileHandle.standardError.write(Data(("Rusterize: " + message + "\n").utf8))
         exit(1)
     }
-    func snapshot(to path:String) throws {
+    func snapshot(to path:String,selfCheck:Bool = false) throws {
+        #if RUSTERIZE_SHADERS
+        let gpu = try gpuView.current()
+        var expectedDraws = 0
+        for step in 0..<(selfCheck ? 5 : 1) {
+            if step == 3 {images.removeAll();gpu.resetResources();_ = rusterize_reset_resources(handle)}
+            let w = step == 2 ? 944 : 960,h = step == 2 ? 664 : 680,scale:CGFloat = step == 2 ? 2 : 1
+            setFrameSize(NSSize(width:CGFloat(w),height:CGFloat(h)))
+            let status = rusterize_frame(handle,Float(w),Float(h),Float(scale),0)
+            guard status & 0x80000000 == 0,let pointer = rusterize_data(handle) else {throw WireError.malformed}
+            // Explicit Image rendering inside application code restores this context.
+            _ = try gpuView.current()
+            let context = try gpu.begin(width:Int(CGFloat(w)*scale),height:Int(CGFloat(h)*scale),scale:scale)
+            activeGPU = gpu;defer {activeGPU = nil}
+            try replay(context,Data(bytes:pointer,count:rusterize_len(handle)))
+            _ = try gpuView.current()
+            if selfCheck {
+                if step == 0 {expectedDraws = gpu.shaderDraws}
+                guard expectedDraws > 0,gpu.shaderDraws == expectedDraws,
+                      ![1,4].contains(step) || gpu.resourceUploads == 0,
+                      step != 3 || gpu.resourceUploads > 0 else {
+                    throw WireError.native("GPU lifecycle check failed at stage \(step)")
+                }
+            }
+            if step < (selfCheck ? 4 : 0) {try gpu.flushCanvas()}
+        }
+        _ = try gpuView.current()
+        let image = try gpu.snapshot()
+        guard let png = NSBitmapImageRep(cgImage:image).representation(using:.png,properties:[:]) else {throw WireError.malformed}
+        try png.write(to:URL(fileURLWithPath:path))
+        print("GPU_COMPOSITION_OK shader_draws=\(gpu.shaderDraws) shader_readbacks=0 snapshot_readbacks=\(gpu.snapshotReadbacks)")
+        if selfCheck {print("GPU_LIFECYCLE_OK cached_frames=2 resized_frames=1 scale_changes=2 resource_resets=1")}
+        #else
+        guard !selfCheck else {throw WireError.native("GPU self-check requires shaders")}
         let status = rusterize_frame(handle,960,680,1,0)
         guard status & 0x80000000 == 0,let pointer = rusterize_data(handle),let context = CGContext(data:nil,width:960,height:680,bitsPerComponent:8,bytesPerRow:960*4,space:CGColorSpace(name:CGColorSpace.sRGB)!,bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue) else {throw WireError.malformed}
         context.translateBy(x:0,y:680);context.scaleBy(x:1,y:-1)
         try replay(context,Data(bytes:pointer,count:rusterize_len(handle)))
         guard let image = context.makeImage(),let png = NSBitmapImageRep(cgImage:image).representation(using:.png,properties:[:]) else {throw WireError.malformed}
         try png.write(to:URL(fileURLWithPath:path))
+        #endif
     }
     override func draw(_ dirtyRect:NSRect) {
+        #if RUSTERIZE_SHADERS
+        gpuView.needsDisplay = true
+        #else
         guard let context = NSGraphicsContext.current?.cgContext else { return }
         let scale = window?.backingScaleFactor ?? 1
         let status = rusterize_frame(handle,Float(bounds.width),Float(bounds.height),Float(scale),ProcessInfo.processInfo.systemUptime-origin)
         if status & 0x80000000 != 0 { fail(String(cString:rusterize_error(handle))); return }
         let count = rusterize_len(handle)
-        guard let pointer = rusterize_data(handle), count >= 8 else { fail("Empty display list"); return }
+        guard let pointer = rusterize_data(handle), count >= 12 else { fail("Empty display list"); return }
         do { try replay(context,Data(bytes:pointer,count:count)) } catch { fail("Invalid display list: \(error)") }
         schedule()
+        #endif
     }
+    #if RUSTERIZE_SHADERS
+    func drawGPU(_ surface:GPUCanvasView) {
+        let pixels = surface.convertToBacking(surface.bounds)
+        guard pixels.width > 0,pixels.height > 0,bounds.width > 0,bounds.height > 0 else {return}
+        let scale = pixels.width / bounds.width
+        let status = rusterize_frame(handle,Float(bounds.width),Float(bounds.height),Float(scale),ProcessInfo.processInfo.systemUptime-origin)
+        if status & 0x80000000 != 0 {fail(String(cString:rusterize_error(handle)));return}
+        let count = rusterize_len(handle)
+        guard let pointer = rusterize_data(handle),count >= 12 else {fail("Empty display list");return}
+        do {
+            let gpu = try surface.current(),context = try gpu.begin(width:Int(pixels.width.rounded()),height:Int(pixels.height.rounded()),scale:scale)
+            activeGPU = gpu;defer {activeGPU = nil}
+            try replay(context,Data(bytes:pointer,count:count))
+            _ = try surface.current()
+            try gpu.present();surface.openGLContext?.flushBuffer()
+        } catch {fail("GPU display list: \(error)")}
+        schedule()
+    }
+    #endif
     private func replay(_ context:CGContext,_ data:Data) throws {
         var r = Reader(data:data)
-        guard try r.u32() == 0x32305a52 else { throw WireError.malformed }
+        guard try r.u32() == 0x33305a52 else { throw WireError.malformed }
+        let resources = try r.u32()
+        for _ in 0..<resources {
+            let opcode = try r.u32(), id = try r.u64()
+            switch opcode {
+            case 1:
+                let w = try r.u32(), h = try r.u32(), length = try r.u32()
+                guard w > 0,h > 0,length % 4 == 0,UInt64(w)*UInt64(h) == UInt64(length)/4 else {throw WireError.malformed}
+                let pixels = try r.take(Int(length))
+                #if RUSTERIZE_SHADERS
+                guard let gpu = activeGPU else {throw WireError.native("Missing GPU compositor")}
+                try gpu.uploadImage(id,width:Int(w),height:Int(h),rgba:pixels)
+                #endif
+                var rgba = [UInt8](pixels)
+                for i in stride(from:0,to:rgba.count,by:4) {let a = UInt32(rgba[i+3]);for c in 0..<3 {rgba[i+c] = UInt8((UInt32(rgba[i+c])*a+127)/255)}}
+                guard let provider = CGDataProvider(data:Data(rgba) as CFData), let image = CGImage(width:Int(w),height:Int(h),bitsPerComponent:8,bitsPerPixel:32,bytesPerRow:Int(w)*4,space:CGColorSpace(name:CGColorSpace.sRGB)!,bitmapInfo:CGBitmapInfo(rawValue:CGImageAlphaInfo.premultipliedLast.rawValue),provider:provider,decode:nil,shouldInterpolate:true,intent:.defaultIntent) else {throw WireError.malformed}
+                images[id] = image
+            case 2:
+                images.removeValue(forKey:id)
+                #if RUSTERIZE_SHADERS
+                activeGPU?.releaseImage(id)
+                #endif
+            #if RUSTERIZE_SHADERS
+            case 3:
+                guard let gpu = activeGPU else {throw WireError.native("Missing GPU compositor")}
+                let sources = try [r.string(),r.string(),r.string(),r.string()]
+                try gpu.uploadSource(id,sources)
+            case 4: activeGPU?.releaseSource(id)
+            #endif
+            default: throw WireError.malformed
+            }
+        }
         let commands = try r.u32()
-        var depth = 0, used = Set<UInt64>()
+        var depth = 0
         context.saveGState()
         defer { for _ in 0..<depth { context.restoreGState() }; context.restoreGState() }
         context.clear(bounds); context.setLineCap(.butt);context.setLineJoin(.miter);context.setMiterLimit(10)
@@ -279,22 +393,21 @@ final class RusterizeView: NSView {
                 let position = try r.point(), text = try NativeText(&r)
                 text.draw(context,at:CGPoint(x:position.x,y:position.y-(opcode == 8 ? text.lines[0].baseline : 0)))
             case 9:
-                let id = try r.u64(),w = try r.u32(),h = try r.u32(),destination = try r.rect(),opacity = try r.f(),length = try r.u32()
-                guard w > 0,h > 0,UInt64(w)*UInt64(h)*4 == UInt64(length) else {throw WireError.malformed}
-                let pixels = try r.take(Int(length))
-                if images[id] == nil {
-                    var rgba = [UInt8](pixels)
-                    for i in stride(from:0,to:rgba.count,by:4) {let a = UInt32(rgba[i+3]);for c in 0..<3 {rgba[i+c] = UInt8((UInt32(rgba[i+c])*a+127)/255)}}
-                    guard let provider = CGDataProvider(data:Data(rgba) as CFData), let image = CGImage(width:Int(w),height:Int(h),bitsPerComponent:8,bitsPerPixel:32,bytesPerRow:Int(w)*4,space:CGColorSpace(name:CGColorSpace.sRGB)!,bitmapInfo:CGBitmapInfo(rawValue:CGImageAlphaInfo.premultipliedLast.rawValue),provider:provider,decode:nil,shouldInterpolate:true,intent:.defaultIntent) else {throw WireError.malformed}
-                    images[id] = image
-                }
-                used.insert(id)
-                context.saveGState();context.setAlpha(opacity);context.translateBy(x:destination.minX,y:destination.maxY);context.scaleBy(x:1,y:-1);context.draw(images[id]!,in:CGRect(origin:.zero,size:destination.size));context.restoreGState()
+                let id = try r.u64(),destination = try r.rect(),opacity = try r.f()
+                guard let image = images[id] else {throw WireError.malformed}
+                context.saveGState();context.setAlpha(opacity);context.translateBy(x:destination.minX,y:destination.maxY);context.scaleBy(x:1,y:-1);context.draw(image,in:CGRect(origin:.zero,size:destination.size));context.restoreGState()
+            #if RUSTERIZE_SHADERS
+            case 11:
+                let id = try r.u64()
+                var values:[Float] = [];for _ in 0..<20 {values.append(Float(try r.f()))}
+                let image = try r.u64(),destination = try r.rect()
+                guard let gpu = activeGPU else {throw WireError.native("Missing GPU compositor")}
+                try gpu.shader(id,values:values,image:image,destination:destination)
+            #endif
             default: throw WireError.malformed
             }
         }
         guard depth == 0,r.offset == data.count else {throw WireError.malformed}
-        images = images.filter { used.contains($0.key) }
         context.restoreGState();context.saveGState()
         context.saveGState();defer {context.restoreGState()}
         let contextPointer=Unmanaged.passUnretained(context).toOpaque(),viewPointer=Unmanaged.passUnretained(self).toOpaque()
@@ -355,8 +468,8 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
 }
 rusterize_set_native_service(nativeService)
 let application = NSApplication.shared
-if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--snapshot" {
-    do {try RusterizeView(frame:NSRect(x:0,y:0,width:960,height:680)).snapshot(to:CommandLine.arguments[2]);exit(0)}
+if CommandLine.arguments.count == 3 && ["--snapshot","--gpu-self-check"].contains(CommandLine.arguments[1]) {
+    do {try RusterizeView(frame:NSRect(x:0,y:0,width:960,height:680)).snapshot(to:CommandLine.arguments[2],selfCheck:CommandLine.arguments[1] == "--gpu-self-check");exit(0)}
     catch {FileHandle.standardError.write(Data("\(error)\n".utf8));exit(1)}
 }
 let delegate = Delegate()

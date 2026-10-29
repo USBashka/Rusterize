@@ -1,4 +1,4 @@
-//! Browser integration fixture: compiled Rust checks plus real RZ02 pixels/input.
+//! Browser integration fixture: compiled Rust checks plus real RZ03 pixels/input.
 use rusterize::{native::*, *};
 use std::cell::RefCell;
 

@@ -90,6 +90,8 @@ pub enum Event {
     Focus(bool),
     Suspend,
     Resume,
+    /// Audio focus was lost. Players pause; resumption requires an explicit play.
+    AudioInterrupted,
     /// Monotonic elapsed seconds, delivered only while animation is requested.
     Frame {
         elapsed: f64,
@@ -108,6 +110,69 @@ pub struct Context {
     next_request: u64,
 }
 impl Context {
+    #[cfg(feature = "files")]
+    pub fn select_file(&mut self, dialog: native::FileDialog) -> native::RequestId {
+        self.native_request(native::NativeRequest::Files(files::FileRequest::Pick(
+            dialog,
+        )))
+    }
+    #[cfg(feature = "files")]
+    pub fn read_file(&mut self, location: files::FileLocation) -> native::RequestId {
+        self.native_request(native::NativeRequest::Files(files::FileRequest::Read(
+            location,
+        )))
+    }
+    #[cfg(feature = "files")]
+    pub fn write_file(
+        &mut self,
+        location: files::FileLocation,
+        bytes: Vec<u8>,
+    ) -> native::RequestId {
+        self.native_request(native::NativeRequest::Files(files::FileRequest::Write {
+            location,
+            bytes,
+        }))
+    }
+    #[cfg(feature = "files")]
+    pub fn release_file(&mut self, location: files::FileLocation) -> native::RequestId {
+        self.native_request(native::NativeRequest::Files(files::FileRequest::Release(
+            location,
+        )))
+    }
+    #[cfg(feature = "files")]
+    pub fn load_data(
+        &mut self,
+        app: impl Into<String>,
+        key: impl Into<String>,
+    ) -> native::RequestId {
+        self.native_request(native::NativeRequest::Files(files::FileRequest::Load {
+            app: app.into(),
+            key: key.into(),
+        }))
+    }
+    #[cfg(feature = "files")]
+    pub fn store_data(
+        &mut self,
+        app: impl Into<String>,
+        key: impl Into<String>,
+        bytes: Vec<u8>,
+    ) -> native::RequestId {
+        self.native_request(native::NativeRequest::Files(files::FileRequest::Store {
+            app: app.into(),
+            key: key.into(),
+            bytes,
+        }))
+    }
+    /// Decode off the UI thread; completion is `NativeResponse::Image`.
+    #[cfg(feature = "image-codecs")]
+    pub fn decode_image(&mut self, bytes: Vec<u8>) -> native::RequestId {
+        self.native_request(native::NativeRequest::DecodeImage(bytes))
+    }
+    /// Decode off the UI thread; completion is `NativeResponse::Audio`.
+    #[cfg(feature = "audio")]
+    pub fn decode_audio(&mut self, bytes: Vec<u8>) -> native::RequestId {
+        self.native_request(native::NativeRequest::DecodeAudio(bytes))
+    }
     /// Queue an operation on a native child WebView. Creation and script execution
     /// finish asynchronously through `Event::WebView`.
     #[cfg(feature = "webview")]
@@ -329,10 +394,59 @@ pub struct Engine<A: Application> {
     scene: Scene,
     suspended: bool,
     last_frame: Option<f64>,
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(feature = "audio", feature = "files", feature = "image-codecs")
+    ))]
+    jobs: Option<crate::jobs::Jobs>,
 }
 impl<A: Application> Engine<A> {
     pub fn pop_native_request(&mut self) -> Option<(native::RequestId, native::NativeRequest)> {
-        self.context.native_requests.pop_front()
+        #[cfg(all(
+            not(target_arch = "wasm32"),
+            any(feature = "audio", feature = "files", feature = "image-codecs")
+        ))]
+        {
+            self.poll_jobs();
+            for _ in 0..64 {
+                let (id, request) = self.context.native_requests.pop_front()?;
+                if !crate::jobs::handles(&request) {
+                    return Some((id, request));
+                }
+                let result = (|| {
+                    if self.jobs.is_none() {
+                        self.jobs = Some(crate::jobs::Jobs::new()?);
+                    }
+                    self.jobs.as_mut().unwrap().submit(id, request)
+                })();
+                if let Err(error) = result {
+                    self.dispatch(Event::NativeResult {
+                        id,
+                        result: Err(error),
+                    });
+                }
+            }
+            None
+        }
+        #[cfg(not(all(
+            not(target_arch = "wasm32"),
+            any(feature = "audio", feature = "files", feature = "image-codecs")
+        )))]
+        {
+            self.context.native_requests.pop_front()
+        }
+    }
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(feature = "audio", feature = "files", feature = "image-codecs")
+    ))]
+    fn poll_jobs(&mut self) {
+        for _ in 0..16 {
+            let Some(event) = self.jobs.as_mut().and_then(|j| j.poll()) else {
+                break;
+            };
+            self.dispatch(event);
+        }
     }
     pub fn new(app: A) -> Self {
         let options = app.window_options();
@@ -350,6 +464,11 @@ impl<A: Application> Engine<A> {
             scene: Scene::default(),
             suspended: false,
             last_frame: None,
+            #[cfg(all(
+                not(target_arch = "wasm32"),
+                any(feature = "audio", feature = "files", feature = "image-codecs")
+            ))]
+            jobs: None,
         };
         engine.context.redraw = true;
         engine.dispatch(Event::Resume);
@@ -378,6 +497,8 @@ impl<A: Application> Engine<A> {
                 self.context.redraw = true;
             }
             Event::Suspend => {
+                #[cfg(feature = "audio")]
+                crate::audio::suspend_all();
                 self.suspended = true;
                 self.last_frame = None;
             }
@@ -386,9 +507,17 @@ impl<A: Application> Engine<A> {
                 self.last_frame = None;
                 self.context.redraw = true;
             }
+            Event::AudioInterrupted => {
+                #[cfg(feature = "audio")]
+                crate::audio::suspend_all();
+            }
             _ => {}
         }
         self.app.event(event, &mut self.context);
+    }
+    /// Schedule a new frame, including after a host discards cached resources.
+    pub fn request_redraw(&mut self) {
+        self.context.request_redraw();
     }
     pub fn needs_redraw(&self) -> bool {
         !self.suspended
@@ -396,12 +525,23 @@ impl<A: Application> Engine<A> {
             && !self.context.exit
     }
     pub fn is_animating(&self) -> bool {
-        self.context.animate && !self.suspended && !self.context.exit
+        let pending = false;
+        #[cfg(all(
+            not(target_arch = "wasm32"),
+            any(feature = "audio", feature = "files", feature = "image-codecs")
+        ))]
+        let pending = pending || self.jobs.as_ref().is_some_and(|j| j.pending());
+        (self.context.animate || pending) && !self.suspended && !self.context.exit
     }
     pub fn should_exit(&self) -> bool {
         self.context.exit
     }
     pub fn frame(&mut self, elapsed: f64) -> Result<&Scene, Error> {
+        #[cfg(all(
+            not(target_arch = "wasm32"),
+            any(feature = "audio", feature = "files", feature = "image-codecs")
+        ))]
+        self.poll_jobs();
         if !elapsed.is_finite() || elapsed < 0.0 {
             return Err(Error("invalid frame timestamp".into()));
         }

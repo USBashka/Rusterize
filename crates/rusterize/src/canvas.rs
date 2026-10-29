@@ -23,6 +23,15 @@ pub enum Command {
         destination: Rect,
         opacity: f32,
     },
+    #[cfg(feature = "shaders")]
+    Shader {
+        source: &'static shader::ShaderSource,
+        params: shader::ShaderParams,
+        image: Option<Image>,
+        destination: Rect,
+        size: [u32; 2],
+        scale: f32,
+    },
 }
 
 /// Reusable display list. A failed frame is cleared, never partly submitted.
@@ -161,6 +170,23 @@ impl<'a> Canvas<'a> {
             opacity,
         });
     }
+    #[cfg(feature = "shaders")]
+    pub(crate) fn shader_command(
+        &mut self,
+        shader: &shader::Shader<'_>,
+        destination: Rect,
+        size: [u32; 2],
+        scale: f32,
+    ) {
+        self.scene.commands.push(Command::Shader {
+            source: shader.source,
+            params: shader.params,
+            image: shader.image.cloned(),
+            destination,
+            size,
+            scale,
+        });
+    }
     pub(crate) fn fail(&mut self, message: &str) {
         if self.error.is_none() {
             self.error = Some(Error(message.into()));
@@ -213,6 +239,28 @@ impl<'a> Canvas<'a> {
                     opacity,
                     ..
                 } => destination.valid() && opacity.is_finite() && (0.0..=1.0).contains(opacity),
+                #[cfg(feature = "shaders")]
+                Command::Shader {
+                    source,
+                    params,
+                    image,
+                    destination,
+                    size,
+                    scale,
+                } => {
+                    destination.valid()
+                        && shader::validate_request(
+                            &shader::Shader {
+                                source,
+                                params: *params,
+                                image: image.as_ref(),
+                            },
+                            *size,
+                            *scale,
+                            4096,
+                        )
+                        .is_ok()
+                }
             };
             if !valid {
                 self.error

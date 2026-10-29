@@ -62,7 +62,7 @@ def enabled_feature(package, feature, env, feature_args, target=None):
             return feature in features.split(',')
     return False
 
-def build_android(args, package, library, target_dir, output, env):
+def build_android(args, package, library, target_dir, output, env, feature_args):
     sdk = sdk_home()
     ndk_setting = args.ndk or os.environ.get('ANDROID_NDK_HOME')
     if ndk_setting:
@@ -86,13 +86,13 @@ def build_android(args, package, library, target_dir, output, env):
         build_env = env.copy()
         build_env['CARGO_TARGET_'+target.upper().replace('-','_')+'_LINKER'] = str(clang)
         build_env['RUSTFLAGS'] = f'-C link-arg=--target={triple}26 -C link-arg=-Wl,-z,max-page-size=16384'
-        run(['cargo','build','--release','--lib','-p',package['name'],'--target',target,*(['--features',args.features] if args.features else [])],env=build_env)
+        run(['cargo','build','--release','--lib','-p',package['name'],'--target',target,*feature_args],env=build_env)
         native.append((abi,target_dir/target/'release'/('lib'+library+'.so')))
     java = java_home()
     tools = latest(sdk/'build-tools','*')
     android_jar = latest(sdk/'platforms','android-*')/'android.jar'
     webview = enabled_feature(package['name'], 'webview', env,
-                              ['--features', args.features] if args.features else [], targets[abis[0]][0])
+                              feature_args, targets[abis[0]][0])
     build = target_dir/'rusterize/android'/('webview' if webview else 'canvas')
     classes, dex = build/'classes', build/'dex'
     classes.mkdir(parents=True,exist_ok=True)
@@ -150,8 +150,11 @@ def main():
     parser.add_argument('--abi',action='append',choices=['arm64-v8a','x86_64'])
     parser.add_argument('--app-id')
     parser.add_argument('--features',help='Comma-separated Cargo features for the application package')
+    parser.add_argument('--no-default-features',action='store_true',help='Disable default features of the application package')
     args = parser.parse_args()
     feature_args = ['--features',args.features] if args.features else []
+    if args.no_default_features:
+        feature_args.append('--no-default-features')
     env = os.environ.copy()
     # Keep Rust/LTO temporary archives on the same writable filesystem.
     temporary = ROOT/'target/rusterize-tmp'
@@ -173,7 +176,7 @@ def main():
     elif args.platform=='android':
         if not library:
             raise RuntimeError('Android app needs a cdylib target and export_app!(App)')
-        artifact = build_android(args,package,library,target_dir,output,env)
+        artifact = build_android(args,package,library,target_dir,output,env,feature_args)
     elif args.platform=='windows':
         if os.name!='nt' or not binary:
             raise RuntimeError('Windows builds need Windows/MSVC and an application binary target')
@@ -187,9 +190,10 @@ def main():
         run(['cargo','build','--release','--lib','-p',name,*feature_args],env=env)
         shaders = enabled_feature(name, 'shaders', env, feature_args)
         webview = enabled_feature(name, 'webview', env, feature_args)
-        flags = shlex.split(run(['pkg-config','--cflags','--libs','gtk4','pangocairo',*(['webkitgtk-6.0'] if webview else [])],capture=True))
+        audio = enabled_feature(name, 'audio', env, feature_args)
+        flags = shlex.split(run(['pkg-config','--cflags','--libs','gtk4','pangocairo',*(['alsa'] if audio else []),*(['epoxy'] if shaders else []),*(['webkitgtk-6.0'] if webview else [])],capture=True))
         artifact = output/name
-        run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',*(['-DRUSTERIZE_WEBVIEW'] if webview else []),ROOT/'hosts/linux/main.c',target_dir/'release'/('lib'+library+'.a'),*flags,*(['-lEGL'] if shaders else []),'-ldl','-lpthread','-lm','-lrt','-lutil','-o',artifact],env=env)
+        run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',*(['-DRUSTERIZE_SHADERS'] if shaders else []),*(['-DRUSTERIZE_WEBVIEW'] if webview else []),ROOT/'hosts/linux/main.c',target_dir/'release'/('lib'+library+'.a'),*flags,*(['-lEGL'] if shaders else []),'-ldl','-lpthread','-lm','-lrt','-lutil','-o',artifact],env=env)
         run(['strip',artifact],env=env)
     else:
         if sys.platform!='darwin' or not library:
@@ -198,10 +202,11 @@ def main():
         run(['cargo','build','--release','--lib','-p',name,*feature_args],env=env)
         shaders = enabled_feature(name, 'shaders', env, feature_args)
         webview = enabled_feature(name, 'webview', env, feature_args)
+        audio = enabled_feature(name, 'audio', env, feature_args)
         artifact = output/(name+'.app')
         executable = artifact/'Contents/MacOS'/name
         executable.parent.mkdir(parents=True,exist_ok=True)
-        run(['swiftc','-Osize','-target',platform.machine()+'-apple-macosx11.0','-import-objc-header',ROOT/'hosts/rusterize.h',ROOT/'hosts/macos/main.swift',*(['-D','RUSTERIZE_WEBVIEW',ROOT/'hosts/macos/webview.swift','-framework','WebKit'] if webview else []),target_dir/'release'/('lib'+library+'.a'),'-framework','AppKit','-framework','CoreGraphics','-framework','CoreText',*(['-framework','OpenGL'] if shaders else []),'-o',executable],env=env)
+        run(['swiftc','-Osize','-target',platform.machine()+'-apple-macosx11.0','-import-objc-header',ROOT/'hosts/rusterize.h',ROOT/'hosts/macos/main.swift',*(['-D','RUSTERIZE_SHADERS',ROOT/'hosts/macos/gpu.swift'] if shaders else []),*(['-D','RUSTERIZE_WEBVIEW',ROOT/'hosts/macos/webview.swift','-framework','WebKit'] if webview else []),target_dir/'release'/('lib'+library+'.a'),'-framework','AppKit','-framework','CoreGraphics','-framework','CoreText',*(['-framework','AudioToolbox','-framework','CoreAudio','-framework','CoreFoundation','-framework','Foundation','-lobjc'] if audio else []),*(['-framework','OpenGL'] if shaders else []),'-o',executable],env=env)
         with (artifact/'Contents/Info.plist').open('wb') as file:
             plistlib.dump({'CFBundleExecutable':name,'CFBundleName':name,'CFBundleIdentifier':args.app_id or 'dev.rusterize.app','CFBundlePackageType':'APPL','NSHighResolutionCapable':True,'LSMinimumSystemVersion':'11.0'},file)
         run(['codesign','--force','--sign','-',artifact],env=env)

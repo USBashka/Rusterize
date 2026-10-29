@@ -1,8 +1,21 @@
-# RZ02 и host ABI
+# RZ03 и host ABI
 
 Все числа little-endian, без padding. Буфер целиком принадлежит Rust. Это доверенный внутрипроцессный транспорт, не формат открытия произвольных файлов.
 
-Заголовок: 4 байта ASCII `RZ02`, затем `u32` — число команд. Каждая команда начинается с `u32` opcode.
+Кадр: 4 байта ASCII `RZ03`, `u32 resource_count`, операции ресурсов, `u32 command_count`, команды рисования. Каждая операция и команда начинается с `u32` opcode. Кэш ресурсов принадлежит одному handle приложения и сохраняется между кадрами.
+
+| Resource opcode | Поля |
+| --- | --- |
+| 1 UploadImage | u64 ID; u32 width; u32 height; u32 byte_length; RGBA8 pixels |
+| 2 ReleaseImage | u64 ID |
+| 3 UploadShader | u64 ID; String vertex; String fragment; String uniform_block; String texture_uniform |
+| 4 ReleaseShader | u64 ID |
+
+Все операции ресурсов исполняются перед рисованием. Upload заменяет предыдущий ресурс с тем же ID; Release отсутствующего ID ничего не делает. Это позволяет повторно воспроизвести последний пакет. ID изображений и шейдеров относятся к разным пространствам. Пустые имена uniform block и sampler означают отсутствие соответствующего параметра. Shader ID действует только в пределах экземпляра приложения и транспорта: он основан на адресе статического `ShaderSource`, а не на содержимом GLSL.
+
+`protocol::Encoder` хранится между кадрами: новое изображение загружается один раз, повторные команды ссылаются на его ID. Когда последний draw/input больше не использует ресурс, следующий кадр освобождает его. Возврат того же ресурса в сцену требует новой загрузки. Один `Image` неизменяем; для повторного использования его сохраняют между кадрами, а не создают заново из тех же пикселей. `protocol::encode` создаёт самостоятельный снимок для пустого кэша; для последовательной отправки кадров следует использовать `Encoder`.
+
+Например, первый кадр с одним изображением 1024 × 1024 занимает 4 194 372 байта, каждый следующий кадр с тем же изображением — 44 байта. Повторное рисование не передаёт RGBA и не требует нового нативного bitmap.
 
 | Opcode | Поля |
 | --- | --- |
@@ -14,10 +27,13 @@
 | 6 Fill | Shape, Paint |
 | 7 Stroke | Shape, Paint, f32 width |
 | 8 Text | Point baseline; TextDescriptor |
+| 9 Image | u64 ID; Rect destination; f32 opacity |
 | 10 TextLayout | Point top-left; TextDescriptor |
-| 9 Image | u64 ID; u32 width,height; Rect; f32 opacity; u32 byte length; RGBA8 pixels |
+| 11 Shader | u64 source_ID; 20 × f32 resolution.xy,time,scale,data; u64 image_ID (0 — без текстуры); Rect destination |
 
 Point = 2 × f32, Rect = 4 × f32 (x,y,width,height), RGBA8 = четыре байта r,g,b,a.
+
+В Shader первые два значения — физические размеры выходной текстуры; `data` содержит 16 значений в порядке `ShaderParams::data[0..4]`. Shader-команда записывается при feature `shaders` на всех платформах. Web исполняет её через WebGL 2 и Canvas; Windows использует общую GL/D3D GPU-текстуру при поддержке драйвером. Android декодирует op 3/4/11 и рисует через HardwareBuffer/EGLImage; Linux — через GtkGLArea GLES 3; macOS — через NSOpenGLView OpenGL 4.1. Windows и Android имеют readback fallback. Порядок команд, clip и transform сохраняются при композиции шейдера. Раскладка RZ03 от расширения числа платформ не меняется.
 
 Shape: `u32 kind`, затем: 0 → Rect; 1 → Rect + f32 radius; 2 → Rect; 3 → u32 segment count + segments. Radius сериализатор ограничивает половиной меньшего измерения. Сегмент: u32 opcode, 0 Move → Point, 1 Line → Point, 2 Cubic → Point control1, control2, end, 3 Close → без полей.
 
@@ -27,7 +43,7 @@ Clear может быть только первой командой; он за�
 
 ## C ABI
 
-Браузерная WASM-оболочка использует этот же ABI без изменения RZ02. Экспортируемые `u64` принимаются и возвращаются как JavaScript BigInt, `usize`/указатели — как wasm32 числа. `memory` принадлежит WASM instance. View display list создаётся после `frame` и читается до следующего изменяющего вызова Rust.
+Браузерная WASM-оболочка использует этот же ABI и RZ03. Экспортируемые `u64` принимаются и возвращаются как JavaScript BigInt, `usize`/указатели — как wasm32 числа. `memory` принадлежит WASM instance. View display list создаётся после `frame` и читается до следующего изменяющего вызова Rust.
 
 Синхронный сервис WASM импортирует из модуля `rusterize` две функции: `service(request_ptr, request_len) -> response_len` и `service_read(output_ptr, output_len)`. Первая вычисляет и удерживает ответ JS, вторая копирует его в выделенный Rust буфер. Формат ответа как у C callback: u32 status, затем payload или UTF-8 ошибки. Между вызовами нельзя входить повторно в Rust или менять удерживаемый ответ. JS обязан заново получить `memory.buffer` при копировании: выделение Rust Vec может увеличить память. Синхронны op 1 (текст), 2 (актуальные capabilities), 21 (WebView event), 22 (NativeResult), 30–32 (GPU).
 
@@ -35,11 +51,15 @@ Clear может быть только первой командой; он за�
 
 Браузерные файловые операции: 13 Read, 14 Write, 15 ListDirectory, 16 Release. После u32 op следует string token; Write дополнительно содержит u32 byte_length и байты. Read возвращает исходные байты, ListDirectory — u32 count и строки токенов, Write/Release — пустой payload. Это токены браузерного доступа, не системные пути; предел чтения/записи 32 МиБ.
 
-Браузерный GPU: op 30 без параметров создаёт WebGL 2 renderer и возвращает `u32 handle, u32 max_size, string renderer_name`; op 32 принимает u32 handle и освобождает его. Op 31 принимает handle, u32 source_id, четыре строки (vertex GLSL, fragment GLSL, uniform block, sampler), 20 f32 (resolution.xy/time/scale/data), u64 image_id, u32 width/height входной текстуры, u32 byte_length и RGBA. Ответ — straight-alpha RGBA8, строки сверху вниз. Предельные размеры общие с Rust ShaderRenderer. RZ02 не меняется: готовый шейдерный результат передаётся обычной командой Image.
+Совместимый браузерный GPU-сервис: op 30 без параметров создаёт WebGL 2 renderer и возвращает `u32 handle, u32 max_size, string renderer_name`; op 32 принимает u32 handle и освобождает его. Op 31 принимает handle, u32 source_id, четыре строки (vertex GLSL, fragment GLSL, uniform block, sampler), 20 f32 (resolution.xy/time/scale/data), u64 image_id, u32 width/height входной текстуры, u32 byte_length и RGBA. Ответ — straight-alpha RGBA8, строки сверху вниз. Этот сервис остаётся для явного `ShaderRenderer::render`, возвращающего CPU Image. Обычный `Canvas::shader` передаёт Shader-команду RZ03 и не читает пиксели из GPU в RAM.
 
-`title(id)` возвращает UTF-8 название окна. `window_option(id, option)` возвращает u32: 0…3 — битовое представление f32 width,height,min_width,min_height; 4…6 — RGB 0x00RRGGBB для фона, текста и рамки заголовка (0xFFFFFFFF — системный цвет); 7 — resizable; 8 — revision. После смены revision оболочка перечитывает title и цвета. Эти настройки передаются отдельно от display list и не изменяют RZ02.
+`title(id)` возвращает UTF-8 название окна. `window_option(id, option)` возвращает u32: 0…3 — битовое представление f32 width,height,min_width,min_height; 4…6 — RGB 0x00RRGGBB для фона, текста и рамки заголовка (0xFFFFFFFF — системный цвет); 7 — resizable; 8 — revision. После смены revision оболочка перечитывает title и цвета. Эти настройки передаются отдельно от display list и не изменяют RZ03.
 
 Объявления: `hosts/rusterize.h`. `create` выдаёт ненулевой handle на текущем потоке. `destroy` идемпотентен для отсутствующего handle. `frame` обновляет viewport, вызывает приложение и сохраняет новый буфер. `data`/`len` возвращают его заимствование. `error` — NUL-terminated строка, её нельзя освобождать. Буфер и ошибка действительны до следующего изменяющего вызова для этого handle. Один handle обслуживается только UI-потоком.
+
+Все кадры надо передавать получателю по порядку, включая ресурсы: пропуск нового Upload делает последующие ссылки недействительными. После пропущенного кадра или потери GPU/bitmap-кэша оболочка сначала очищает свои ресурсы, затем вызывает `rusterize_reset_resources(id)`, планирует новый `frame` и полностью воспроизводит его. Reset очищает старые `data`/`len`, запрашивает перерисовку и возвращает обычную маску статуса. Следующий кадр заново загружает все нужные ресурсы. В Android этот вызов экспортируется как `nativeResetResources(long) -> int`. При Destroy оболочка освобождает весь кэш handle.
+
+Повторный вызов `frame` для неизменившейся сцены создаёт новый пакет без Upload; такой пакет не заменяет непереданный предыдущий. Для повторного показа уже полученного кадра можно повторить последний пакет целиком: Upload заменяет ресурс, Release идемпотентен, а рисование начинается с чистой поверхности. Произвольное возвращение к старым пакетам после новых кадров не поддерживается без сброса и самостоятельного снимка.
 
 Статус — битовая маска: 1 REDRAW (запрошен кадр), 2 ANIMATE (нужны периодические кадры), 4 EXIT, 0x80000000 FAILED. При FAILED запроси `error`, покажи/запиши ошибку и закрой оболочку. Не продолжай бесконечно запрашивать кадры.
 
@@ -59,11 +79,11 @@ Clear может быть только первой командой; он за�
 При изменении раскладки команд обнови magic/version и каждый декодер. Дополнение события не требует менять рисующий протокол, если сохраняется прежняя семантика остальных событий.
 
 
-## Текстовый дескриптор RZ02
+## Текстовый дескриптор
 
 `f32 size; RGBA8; u32 family; u32 flags; String font_name; f32 width; u32 wrap; u32 align; u32 direction; String text`. String = u32 byte length + UTF-8, без NUL. Пустое font_name использует generic family. Flags: bold=1, italic=2, underline=4, strikethrough=8. Wrap: none=0, word=1, character=2. Align: left=0, center=1, right=2. Direction: left-to-right=0, right-to-left=1. Для opcode 8 options равны width=1000000, wrap=0, align=0, direction=0. Opcode 8 остаётся однострочным.
 
-RZ02 несовместим с RZ01: при обновлении зависимости нужно обновить скопированные `hosts` в существующих приложениях. Генератор копирует актуальные оболочки и документацию автоматически.
+RZ03 несовместим с RZ02 и RZ01: при обновлении зависимости нужно обновить скопированные `hosts` в существующих приложениях. Генератор копирует актуальные оболочки и документацию автоматически.
 
 ## Обратный сервис оболочки
 
@@ -94,8 +114,35 @@ Cursor: Arrow=0, Text=1, Hand=2, Crosshair=3, Move=4, ResizeHorizontal=5, Resize
 
 ## Расширение нативного сервиса WebView
 
-Feature `webview` добавляет коды сервиса 20 и 21 без изменения display list `RZ02`. Все поля little-endian; строки используют существующий формат: длина в байтах u32 и UTF-8. Бит capabilities 1024 означает наличие адаптера в сборке.
+Feature `webview` добавляет коды сервиса 20 и 21 без изменения display list `RZ03`. Все поля little-endian; строки используют существующий формат: длина в байтах u32 и UTF-8. Бит capabilities 1024 означает наличие адаптера в сборке.
 
 Запрос 20: `u32(20), u32(view_id), u32(action), payload`. ID ненулевые и относятся к окну оболочки. Действия: 1 Create (`f32 x,y,width,height; u32 visible,javascript`); 2 Destroy; 3 SetBounds (`f32 x,y,width,height`); 4 SetVisible (`u32 bool`); 5 Navigate (строка); 6 LoadHtml (строка); 7 Evaluate (`u32 token`, строка script); 8 Focus; 9 Reload; 10 GoBack; 11 GoForward. Успех — пустые данные внутри существующего формата ответа сервиса. Ответ подтверждает принятие запроса; завершение асинхронной операции сообщает событие.
 
 Запрос 21 (`u32(21)`) извлекает одно событие. Пустая очередь: `u32(0)`. Иначе: `u32 kind, u32 view_id, u32 token, string value`. Виды: 1 Ready (пустое значение); 2 Loaded (URL); 3 Error (сообщение); 4 ScriptResult (JSON); 5 ScriptError (сообщение). Токен используют только виды 4/5. Существующий цикл C/JNI преобразует события в `Event::WebView` после освобождения заимствований приложения. Нативные callbacks только пополняют очередь и будят UI-поток. Destroy удаляет события экземпляра и отменяет доставку его незавершённых callbacks до повторного использования ID. Формат ответа C-сервиса со словом статуса не меняется. Оболочки без поддержки WebView возвращают ошибку неподдерживаемой операции и не устанавливают бит capabilities.
+
+## Медиасервисы и постоянные данные
+
+Расширения не меняют RZ03. Биты capabilities: audio=2048, image-codecs=4096, file I/O=8192, storage=16384; Rust маскирует отсутствующие Cargo features. Новое событие kind=12 — AudioInterrupted. Android JNI nativeCreate принимает application Context; старые скопированные hosts нужно обновить.
+
+| Op | Поля запроса после u32 op | Успешный payload |
+| --- | --- | --- |
+| 40 | u32 location_kind, String location | Байты файла |
+| 41 | u32 location_kind, String location, u32 length, bytes | Пусто |
+| 42 | String app, String key | u8 present; при 1 — оставшиеся байты значения |
+| 43 | String app, String key, u32 length, bytes | Пусто |
+| 44 | u32 location_kind, String location | Пусто |
+| 48 / 49 | — | f64 Unix / monotonic seconds |
+| 50 | u32 length, PNG/JPEG bytes | u32 width, u32 height, RGBA8 bytes |
+| 51 | u32 length, MP3/WAV bytes | u32 clip_id, rate, channels, frames; 512 × f32 peaks |
+| 70 | u32 clip_id | u32 player_id |
+| 71 / 72 / 73 | u32 player_id | Play / Pause / Stop, пусто |
+| 74 | u32 player_id, f64 seconds | Пусто |
+| 75 | u32 player_id, f32 volume | Пусто |
+| 76 | u32 player_id | u32 state; f64 position, duration, output_latency |
+| 77 / 79 | u32 player_id / clip_id | Drop, пусто |
+| 78 | u32 clip_id, start_frame, sample_count | sample_count × f32 interleaved PCM |
+| 80 | — | Interrupt всех голосов экземпляра, пусто |
+
+location_kind: 0 SystemPath, 1 ContentUri, 2 BrowserToken. Native worker использует PathBuf напрямую; путь в wire-формате требует UTF-8. Выбор файла остаётся opcode 10. State: 0 Stopped, 1 Playing, 2 Paused, 3 Ended, 4 Interrupted, 5 Failed. Ограничения и семантика позиции: [MEDIA.md](MEDIA.md). Максимальный браузерный ответ увеличен до 64 МиБ + 16 КиБ для RGBA с заголовком; исходники/файловые значения ограничены 32 МиБ. Операции 40–44/50–51 в браузере идут через существующую очередь request/result; 48–49/70–80 синхронны и ограничены по объёму.
+
+Android: op 60 = u64 app, u64 request, полный запрос 10; запускает picker без блокировки. Op 61 = u64 app; ответ u32 0 при пустой очереди либо u32 1, u64 request, u32 status и результат старого picker/UTF-8 ошибки. Op 62 запрашивает audio focus. Op 63 = u64 app, отменяет ожидающие picker-ответы. Файловый JNI worker entry point отделён от UI-сервиса. Нативные декодеры не проходят через JS/JNI, результаты доставляет Engine.

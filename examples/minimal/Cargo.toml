@@ -1,0 +1,12 @@
+[package]
+name = "rusterize-minimal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[lib]
+crate-type = ["rlib", "staticlib", "cdylib"]
+[[bin]]
+name = "minimal"
+path = "src/main.rs"
+[dependencies]
+rusterize = { path = "../../crates/rusterize" }

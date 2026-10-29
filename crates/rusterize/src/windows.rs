@@ -21,6 +21,8 @@ pub struct WindowMessage {
     pub lparam: LPARAM,
 }
 
+#[cfg(feature = "shaders")]
+use ::windows::Win32::Graphics::{Direct3D::*, Direct3D11::*, Dxgi::*};
 use ::windows::{
     core::{w, Interface, PCWSTR},
     Win32::{
@@ -142,8 +144,15 @@ pub struct D2dRenderer {
     solid: ID2D1SolidColorBrush,
     stroke: ID2D1StrokeStyle,
     images: HashMap<u64, ID2D1Bitmap>,
+    used_images: HashSet<u64>,
     text: HashMap<Vec<u8>, (IDWriteTextLayout, f32)>,
     lost: bool,
+    #[cfg(feature = "shaders")]
+    shaders: Option<shader::ShaderRenderer>,
+    #[cfg(feature = "shaders")]
+    gpu: Option<(ID3D11Device, ID2D1DeviceContext)>,
+    #[cfg(feature = "shaders")]
+    gpu_shader_draws: usize,
 }
 impl D2dRenderer {
     /// Wrap an existing Direct2D target on its owning thread.
@@ -165,11 +174,38 @@ impl D2dRenderer {
                 solid,
                 stroke,
                 images: HashMap::new(),
+                used_images: HashSet::new(),
                 text: HashMap::new(),
                 lost: false,
+                #[cfg(feature = "shaders")]
+                shaders: None,
+                #[cfg(feature = "shaders")]
+                gpu: None,
+                #[cfg(feature = "shaders")]
+                gpu_shader_draws: 0,
             })
         }
     }
+    /// Wrap a Direct2D device context backed by `device`, enabling shared GPU
+    /// shader textures when the OpenGL driver supports WGL_NV_DX_interop2.
+    /// Unsupported adapters retain the ordinary image fallback.
+    #[cfg(feature = "shaders")]
+    pub fn new_gpu(
+        factory: ID2D1Factory,
+        context: ID2D1DeviceContext,
+        device: ID3D11Device,
+    ) -> Result<Self, Error> {
+        let mut renderer = Self::new(factory, context.cast()?)?;
+        renderer.gpu = Some((device, context));
+        Ok(renderer)
+    }
+
+    /// Number of shader draws composited without CPU readback in the last frame.
+    #[cfg(feature = "shaders")]
+    pub fn gpu_shader_draws(&self) -> usize {
+        self.gpu_shader_draws
+    }
+
     fn brush(&self, paint: &Paint) -> Result<ID2D1Brush, Error> {
         unsafe {
             Ok(match paint {
@@ -320,6 +356,7 @@ impl D2dRenderer {
         Ok(())
     }
     fn image(&mut self, image: &Image, destination: Rect, opacity: f32) -> Result<(), Error> {
+        self.used_images.insert(image.id());
         if !self.images.contains_key(&image.id()) {
             if self.images.len() >= 128 {
                 self.images.clear();
@@ -361,6 +398,40 @@ impl D2dRenderer {
         }
         Ok(())
     }
+
+    #[cfg(feature = "shaders")]
+    fn shader(
+        &mut self,
+        shader: &shader::Shader<'_>,
+        destination: Rect,
+        size: [u32; 2],
+        scale: f32,
+        slot: usize,
+    ) -> Result<(), Error> {
+        if self.shaders.is_none() {
+            self.shaders = Some(shader::ShaderRenderer::new()?);
+        }
+        let renderer = self.shaders.as_mut().unwrap();
+        if let Some((device, context)) = &self.gpu {
+            if let Some(bitmap) =
+                renderer.render_shared(shader, size, scale, device, context, slot)?
+            {
+                unsafe {
+                    self.target.DrawBitmap(
+                        &bitmap,
+                        Some(&rect(destination)),
+                        1.0,
+                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                        None,
+                    );
+                }
+                self.gpu_shader_draws += 1;
+                return Ok(());
+            }
+        }
+        let image = renderer.render(shader, size, scale)?;
+        self.image(&image, destination, 1.0)
+    }
 }
 impl Renderer for D2dRenderer {
     fn render(&mut self, scene: &Scene, viewport: Viewport) -> Result<(), Error> {
@@ -378,6 +449,13 @@ impl D2dRenderer {
         let mut transform = Transform::IDENTITY;
         let mut stack = Vec::new();
         let mut layers = 0usize;
+        self.used_images.clear();
+        #[cfg(feature = "shaders")]
+        let mut shader_slot = 0;
+        #[cfg(feature = "shaders")]
+        {
+            self.gpu_shader_draws = 0;
+        }
         unsafe {
             self.target
                 .SetDpi(viewport.scale * 96.0, viewport.scale * 96.0);
@@ -449,6 +527,28 @@ impl D2dRenderer {
                         destination,
                         opacity,
                     } => self.image(image, *destination, *opacity)?,
+                    #[cfg(feature = "shaders")]
+                    Command::Shader {
+                        source,
+                        params,
+                        image,
+                        destination,
+                        size,
+                        scale,
+                    } => {
+                        self.shader(
+                            &shader::Shader {
+                                source,
+                                params: *params,
+                                image: image.as_ref(),
+                            },
+                            *destination,
+                            *size,
+                            *scale,
+                            shader_slot,
+                        )?;
+                        shader_slot += 1;
+                    }
                 }
             }
             unsafe {
@@ -471,22 +571,15 @@ impl D2dRenderer {
             }
         }
         let end = unsafe { self.target.EndDraw(None, None) };
+        #[cfg(feature = "shaders")]
+        if let Some(renderer) = &mut self.shaders {
+            renderer.trim_shared(shader_slot);
+        }
         self.lost = end
             .as_ref()
             .is_err_and(|e| e.code() == D2DERR_RECREATE_TARGET);
         let end = end.map_err(Error::from);
-        let used: HashSet<_> = scene
-            .commands()
-            .iter()
-            .filter_map(|c| {
-                if let Command::Image { image, .. } = c {
-                    Some(image.id())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        self.images.retain(|id, _| used.contains(id));
+        self.images.retain(|id, _| self.used_images.contains(id));
         result.and(end)
     }
 }
@@ -572,9 +665,159 @@ pub fn render_offscreen_with(
 #[cfg(feature = "webview")]
 mod webview;
 
+enum WindowTarget {
+    Hwnd(ID2D1HwndRenderTarget),
+    #[cfg(feature = "shaders")]
+    Gpu {
+        swapchain: IDXGISwapChain,
+        context: ID2D1DeviceContext,
+        size: [u32; 2],
+    },
+}
+
+impl WindowTarget {
+    #[cfg(feature = "shaders")]
+    unsafe fn gpu(hwnd: HWND, width: u32, height: u32) -> Result<(Self, D2dRenderer), Error> {
+        let mut device = None;
+        let mut swapchain = None;
+        D3D11CreateDeviceAndSwapChain(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&DXGI_SWAP_CHAIN_DESC {
+                BufferDesc: DXGI_MODE_DESC {
+                    Width: width,
+                    Height: height,
+                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    ..Default::default()
+                },
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                BufferCount: 1,
+                OutputWindow: hwnd,
+                Windowed: true.into(),
+                SwapEffect: DXGI_SWAP_EFFECT_DISCARD,
+                ..Default::default()
+            }),
+            Some(&mut swapchain),
+            Some(&mut device),
+            None,
+            None,
+        )?;
+        let device = device.ok_or_else(|| Error("Missing Direct3D device".into()))?;
+        let swapchain = swapchain.ok_or_else(|| Error("Missing DXGI swapchain".into()))?;
+        let factory: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
+        let context = factory
+            .CreateDevice(&device.cast::<IDXGIDevice>()?)?
+            .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
+        Self::set_backbuffer(&swapchain, &context)?;
+        let renderer = D2dRenderer::new_gpu(factory.cast()?, context.clone(), device)?;
+        Ok((
+            Self::Gpu {
+                swapchain,
+                context,
+                size: [width, height],
+            },
+            renderer,
+        ))
+    }
+
+    #[cfg(feature = "shaders")]
+    unsafe fn set_backbuffer(
+        swapchain: &IDXGISwapChain,
+        context: &ID2D1DeviceContext,
+    ) -> Result<(), Error> {
+        let surface: IDXGISurface = swapchain.GetBuffer(0)?;
+        let bitmap = context.CreateBitmapFromDxgiSurface(
+            &surface,
+            Some(&D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_IGNORE,
+                },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+                ..Default::default()
+            }),
+        )?;
+        context.SetTarget(&bitmap);
+        Ok(())
+    }
+
+    unsafe fn new(hwnd: HWND, width: u32, height: u32) -> Result<(Self, D2dRenderer), Error> {
+        #[cfg(feature = "shaders")]
+        if let Ok(gpu) = Self::gpu(hwnd, width, height) {
+            return Ok(gpu);
+        }
+        let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
+        let target = factory.CreateHwndRenderTarget(
+            &D2D1_RENDER_TARGET_PROPERTIES {
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_IGNORE,
+                },
+                ..Default::default()
+            },
+            &D2D1_HWND_RENDER_TARGET_PROPERTIES {
+                hwnd,
+                pixelSize: D2D_SIZE_U { width, height },
+                presentOptions: D2D1_PRESENT_OPTIONS_NONE,
+            },
+        )?;
+        let renderer = D2dRenderer::new(factory, target.cast()?)?;
+        Ok((Self::Hwnd(target), renderer))
+    }
+
+    unsafe fn resize(&mut self, width: u32, height: u32) -> Result<(), Error> {
+        match self {
+            Self::Hwnd(target) => {
+                let size = target.GetPixelSize();
+                if size.width != width || size.height != height {
+                    target.Resize(&D2D_SIZE_U { width, height })?;
+                }
+            }
+            #[cfg(feature = "shaders")]
+            Self::Gpu {
+                swapchain,
+                context,
+                size,
+            } if *size != [width, height] => {
+                context.SetTarget(None);
+                swapchain.ResizeBuffers(
+                    0,
+                    width,
+                    height,
+                    DXGI_FORMAT_UNKNOWN,
+                    DXGI_SWAP_CHAIN_FLAG::default(),
+                )?;
+                Self::set_backbuffer(swapchain, context)?;
+                *size = [width, height];
+            }
+            #[cfg(feature = "shaders")]
+            Self::Gpu { .. } => {}
+        }
+        Ok(())
+    }
+
+    unsafe fn present(&self) -> Result<(), Error> {
+        #[cfg(feature = "shaders")]
+        if let Self::Gpu { swapchain, .. } = self {
+            swapchain.Present(1, DXGI_PRESENT::default()).ok()?;
+        }
+        Ok(())
+    }
+}
+
 struct State<A: Application> {
     engine: RefCell<Engine<A>>,
-    device: RefCell<Option<(ID2D1HwndRenderTarget, D2dRenderer)>>,
+    device: RefCell<Option<(WindowTarget, D2dRenderer)>>,
     error: RefCell<Option<Error>>,
     start: Instant,
     options: WindowOptions,
@@ -671,35 +914,27 @@ impl<A: Application> State<A> {
         engine.frame(self.start.elapsed().as_secs_f64())?;
         let mut device = self.device.borrow_mut();
         if device.is_none() {
-            let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
-            let target = factory.CreateHwndRenderTarget(
-                &D2D1_RENDER_TARGET_PROPERTIES {
-                    pixelFormat: D2D1_PIXEL_FORMAT {
-                        format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                        alphaMode: D2D1_ALPHA_MODE_IGNORE,
-                    },
-                    ..Default::default()
-                },
-                &D2D1_HWND_RENDER_TARGET_PROPERTIES {
-                    hwnd,
-                    pixelSize: D2D_SIZE_U { width, height },
-                    presentOptions: D2D1_PRESENT_OPTIONS_NONE,
-                },
-            )?;
-            let renderer = D2dRenderer::new(factory, target.cast()?)?;
-            *device = Some((target, renderer));
+            *device = Some(WindowTarget::new(hwnd, width, height)?);
         }
         let (target, renderer) = device.as_mut().unwrap();
-        let size = target.GetPixelSize();
-        if size.width != width || size.height != height {
-            target.Resize(&D2D_SIZE_U { width, height })?;
-        }
         // Device removal is recoverable: release all target-bound resources and retry next paint.
         let (app, scene) = engine.drawing_parts();
-        match renderer.render_with(scene, viewport, |native| app.native_draw(native, viewport)) {
+        let result = target
+            .resize(width, height)
+            .and_then(|()| {
+                renderer.render_with(scene, viewport, |native| app.native_draw(native, viewport))
+            })
+            .and_then(|()| target.present());
+        match result {
             Ok(()) => Ok(()),
             Err(error) => {
                 let lost = renderer.lost;
+                #[cfg(feature = "shaders")]
+                let lost = lost
+                    || renderer
+                        .gpu
+                        .as_ref()
+                        .is_some_and(|(d, _)| d.GetDeviceRemovedReason().is_err());
                 *device = None;
                 if lost {
                     let _ = InvalidateRect(Some(hwnd), None, false);

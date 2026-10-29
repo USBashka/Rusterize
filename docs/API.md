@@ -1,6 +1,6 @@
 # API
 
-Веб-цель `--platform web` использует общий `Application`, Canvas, события и `TextLayout`. Загрузка — через `start(canvas, wasmUrl)` из `hosts/web/rusterize.js`; остановка — `destroy()`. Системные capabilities: текст и курсор. [Сборка, жизненный цикл и ограничения браузера](WEB.md).
+Веб-цель `--platform web` использует общий `Application`, Canvas, события и `TextLayout`. Загрузка — через `start(canvas, wasmUrl)` из `hosts/web/rusterize.js`; остановка — `destroy()`. Доступность системных операций проверяется через `native::capabilities`, результат — через `Event::NativeResult`. [Сборка, жизненный цикл и ограничения браузера](WEB.md).
 
 ## Окно и заголовок
 
@@ -53,7 +53,7 @@ canvas.with_save(|c| {
 
 `text(string, baseline, TextStyle)` рисует одну строку UTF-8. Размер шрифта — в логических пикселях. `FontFamily::{Sans,Serif,Monospace}`, `TextStyle::font("имя")`, `bold()`, `italic()`, `underline()` и `strikethrough()`. Системная замена отсутствующих глифов зависит от ОС. `measure_text` возвращает нативные метрики; `TextLayout::new` создаёт многострочную раскладку, а `Canvas::text_layout` рисует её от верхнего левого угла. Подробности и примеры — в [нативном API](NATIVE_API.md).
 
-`Image::rgba(width,height,pixels)` проверяет точное число байтов и лимит 64 МиБ. Ресурс неизменяемый, `Clone` разделяет данные. `image(&image, destination, opacity)` масштабирует полное изображение с линейной интерполяцией. Декодирование PNG/JPEG не входит в ядро: декодируй подходящей библиотекой в RGBA8 один раз при загрузке.
+`Image::rgba(width,height,pixels)` проверяет точное число байтов и лимит 64 МиБ. Ресурс неизменяемый, `Clone` разделяет данные. `image(&image, destination, opacity)` масштабирует полное изображение с линейной интерполяцией. Опциональная feature `image-codecs` добавляет `Image::decode` и асинхронный `Context::decode_image` для PNG/JPEG с ограничениями размеров и EXIF orientation. [Медиасервисы, аудиочасы, файлы и хранилище](MEDIA.md).
 
 ## События
 
@@ -73,6 +73,6 @@ Feature `webview` добавляет `Context::webview`, `webview::{WebViewId, W
 
 `Renderer::render(&Scene, Viewport)` — интерфейс нового Rust-адаптера. `windows::D2dRenderer::new(factory,target)` позволяет использовать готовый Direct2D target. `windows::render_offscreen` возвращает premultiplied BGRA8 и используется для тестов без окна.
 
-Feature `shaders` добавляет `shader::{ShaderSource, ShaderParams, ShaderRenderer}` и `Canvas::shader`. WGSL переводится Naga при сборке приложения; результат исполняется системным OpenGL и становится обычным Image в display list. Подключение, текстурный вход, кэш и ограничения readback описаны в [SHADERS.md](SHADERS.md).
+Feature `shaders` добавляет `shader::{ShaderSource, ShaderParams, ShaderRenderer}` и `Canvas::shader`. WGSL переводится Naga при сборке приложения. Все платформы записывают отложенную Shader-команду для GPU-композиции. Windows и Android сохраняют readback при недоступном межконтекстном обмене; явный `ShaderRenderer::render` всегда возвращает CPU-изображение. Подключение, текстурный вход, требования платформ и границы проверки описаны в [SHADERS.md](SHADERS.md).
 
 `export_app!` создаёт C ABI и, на Android, JNI. Внешние оболочки получают проверенный display list через бинарный [протокол](protocol.md). Ошибка кадра очищает его целиком; host переходит в состояние FAILED. Release-профиль abort завершает процесс при panic приложения — это не механизм восстановления ошибок.

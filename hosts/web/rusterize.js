@@ -1,6 +1,7 @@
-// RZ02 browser host. No runtime dependencies or generated JavaScript bindings.
+// RZ03 browser host. No runtime dependencies or generated JavaScript bindings.
 import { Reader, utf8, encoder } from './wire.js';
 import { BrowserServices } from './services.js';
+import { Shaders } from './shaders.js';
 const FAILED = 0x80000000;
 
 function textStyle(ctx, t) {
@@ -162,10 +163,33 @@ export class Renderer {
     const measureCanvas = document.createElement('canvas');
     this.text = new TextEngine(measureCanvas.getContext('2d'));
     this.images = new Map();
+    this.shaders = new Shaders();
+  }
+  resetResources() {
+    this.images.clear();
+    this.shaders.compositor?.destroy();
+    this.shaders.compositor = null;
+    this.shaders.sources.clear();
   }
   render(bytes, scale = 1) {
-    const r = new Reader(bytes), ctx = this.context, used = new Set();
-    if (utf8.decode(r.take(4)) !== 'RZ02') throw new Error('Unsupported Rusterize display-list version');
+    const r = new Reader(bytes), ctx = this.context;
+    if (utf8.decode(r.take(4)) !== 'RZ03') throw new Error('Unsupported Rusterize display-list version');
+    const resources = r.u32();
+    for (let i = 0; i < resources; i++) {
+      const op = r.u32(), id = r.u64();
+      if (op === 1) {
+        const width = r.u32(), height = r.u32(), pixels = r.take(r.u32());
+        if (!width || !height || width * height * 4 !== pixels.length || pixels.length > 64 * 1024 * 1024)
+          throw new Error('Invalid Rusterize image');
+        this.shaders.releaseImage(id);
+        this.images.set(id,{width,height,pixels:pixels.slice()});
+      } else if (op === 2) {
+        this.images.delete(id); this.shaders.releaseImage(id);
+      } else if (op === 3) {
+        this.shaders.uploadSource(id,[r.string(),r.string(),r.string(),r.string()]);
+      } else if (op === 4) this.shaders.releaseSource(id);
+      else throw new Error('Unknown Rusterize resource operation');
+    }
     const count = r.u32();
     let depth = 0;
     ctx.save();
@@ -199,18 +223,21 @@ export class Renderer {
             const [x, y] = r.point(); this.text.draw(ctx, r.text(), x, y, multiline); break;
           }
           case 9: {
-            const id = r.u64(), width = r.u32(), height = r.u32(), destination = r.rect(), opacity = r.f32();
-            const pixels = r.take(r.u32());
-            if (!width || !height || width * height * 4 !== pixels.length || pixels.length > 64 * 1024 * 1024)
-              throw new Error('Invalid Rusterize image');
-            let image = this.images.get(id);
-            if (!image) {
-              image = document.createElement('canvas'); image.width = width; image.height = height;
-              image.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(pixels), width, height), 0, 0);
-              this.images.set(id, image);
+            const id = r.u64(), destination = r.rect(), opacity = r.f32();
+            const image = this.images.get(id);
+            if (!image) throw new Error('Unknown Rusterize image resource');
+            if (!image.canvas) {
+              const {width,height,pixels} = image;
+              image.canvas = document.createElement('canvas'); image.canvas.width = width; image.canvas.height = height;
+              image.canvas.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(pixels), width, height), 0, 0);
             }
-            used.add(id);
-            ctx.globalAlpha = opacity; ctx.drawImage(image, ...destination); ctx.globalAlpha = 1;
+            ctx.globalAlpha = opacity; ctx.drawImage(image.canvas, ...destination); ctx.globalAlpha = 1;
+            break;
+          }
+          case 11: {
+            const source = r.u64(), values = Float32Array.from({length:20},()=>r.f32());
+            const imageId = r.u64(), destination = r.rect();
+            this.shaders.draw(ctx,source,values,imageId,this.images.get(imageId),destination);
             break;
           }
           default: throw new Error('Unknown Rusterize drawing command');
@@ -221,7 +248,6 @@ export class Renderer {
     } finally {
       while (depth-- > 0) ctx.restore();
       ctx.restore();
-      for (const id of this.images.keys()) if (!used.has(id)) this.images.delete(id);
     }
   }
 }
@@ -239,7 +265,8 @@ export async function start(canvas, wasmUrl, { onError = console.error, onExit =
   let width = 0, height = 0, scale = 1, titleRevision = -1, frames = 0;
   let focused = false;
   const listeners = [], contacts = new Map();
-  const services = new BrowserServices(canvas, renderer.text, wake);
+  const services = new BrowserServices(canvas, renderer.text, wake, renderer.shaders,new URL(wasmUrl,document.baseURI).href);
+  renderer.shaders.wake = () => { dirty = true; wake(); };
   const memory = (pointer, length) => {
     const buffer = exports.memory.buffer;
     pointer >>>= 0;
@@ -320,6 +347,11 @@ export async function start(canvas, wasmUrl, { onError = console.error, onExit =
   }
   function wake() {
     if (!destroyed && !document.hidden && !raf) raf = requestAnimationFrame(tick);
+  }
+  function resetResources() {
+    if (destroyed) return;
+    renderer.resetResources();
+    if (check(exports.rusterize_reset_resources(id))) { dirty = true; wake(); }
   }
   function poll() {
     const status = exports.rusterize_poll_native(id);
@@ -435,6 +467,8 @@ export async function start(canvas, wasmUrl, { onError = console.error, onExit =
       else { event(11); dirty = true; wake(); }
     });
     listen(window, 'pagehide', e => { if (!e.persisted) destroy(); });
+    listen(canvas, 'contextlost', e => e.preventDefault());
+    listen(canvas, 'contextrestored', resetResources);
     listen(window, 'resize', resize);
     listen(window, 'scroll', () => services.update(), true);
     observer = new ResizeObserver(() => { try { resize(); } catch (error) { fail(error); } });
@@ -446,6 +480,7 @@ export async function start(canvas, wasmUrl, { onError = console.error, onExit =
   } catch (error) { try { destroy(); } catch { /* Preserve the startup error. */ } throw error; }
   return {
     destroy,
+    resetResources,
     requestRedraw() { dirty = true; wake(); },
     // Application-owned exports are an optional bridge for an embedding page.
     callExport(name, ...args) {

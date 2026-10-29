@@ -3,6 +3,9 @@
 #include <pango/pangocairo.h>
 #include <math.h>
 #include <string.h>
+#ifdef RUSTERIZE_SHADERS
+#include <epoxy/gl.h>
+#endif
 #include "../rusterize.h"
 
 typedef struct { const uint8_t *p, *end; gboolean ok; } Reader;
@@ -76,11 +79,20 @@ static void text_metrics(NativeText *t,GByteArray *out) {
     pango_layout_iter_free(iter);
 }
 
-typedef struct {cairo_surface_t *surface;uint8_t *data;uint64_t generation;} Image;
 typedef struct {
-    uint64_t id,generation;GtkWidget *window,*area;GHashTable *images,*keys;guint tick,schedule_source;gint64 origin;
+    cairo_surface_t *surface;
+#ifdef RUSTERIZE_SHADERS
+    GBytes *rgba;GLuint texture;
+#endif
+} Image;
+typedef struct {
+    uint64_t id;GtkWidget *window,*area;GHashTable *images,*keys;guint tick,schedule_source;gint64 origin;
     GtkCssProvider *chrome;uint32_t window_revision;
     double pointer_x,pointer_y;uint32_t buttons;gboolean failed,closing;
+#ifdef RUSTERIZE_SHADERS
+    struct Gpu *gpu;GHashTable *shaders;const char *snapshot;gboolean snapshot_done,self_check;
+    guint check_step,check_draws,resource_uploads;
+#endif
 } App;
 
 static App *service_app;
@@ -148,11 +160,55 @@ static void update_chrome(App *app) {
     #endif
     g_string_free(css,TRUE);
 }
-static void image_free(gpointer ptr) {Image *i=ptr;cairo_surface_destroy(i->surface);g_free(i->data);g_free(i);}
-static gboolean image_unused(gpointer key,gpointer value,gpointer data) {(void)key;return ((Image*)value)->generation!=*(uint64_t*)data;}
+static void image_free(gpointer ptr) {
+    Image *i=ptr;
+#ifdef RUSTERIZE_SHADERS
+    if(i->texture && gdk_gl_context_get_current())glDeleteTextures(1,&i->texture);
+    if(i->rgba)g_bytes_unref(i->rgba);
+#endif
+    cairo_surface_destroy(i->surface);g_free(i);
+}
+static gboolean image_upload(App *app,Reader *r,uint64_t id) {
+    uint32_t w=u32(r),h=u32(r),n=u32(r);const uint8_t *pixels=bytes(r,n);
+    if(!r->ok || !pixels || !w || !h || w>G_MAXINT/4 || h>G_MAXINT || (uint64_t)w*h*4!=n)return FALSE;
+    int stride=cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32,(int)w);
+    if(stride<=0 || (size_t)stride>G_MAXSIZE/h)return FALSE;
+    uint8_t *data=g_try_malloc0((size_t)stride*h);if(!data)return FALSE;
+    for(uint32_t yy=0;yy<h;yy++)for(uint32_t xx=0;xx<w;xx++) {
+        const uint8_t *p=pixels+((size_t)yy*w+xx)*4;uint32_t a=p[3];uint32_t argb=(a<<24)|(((p[0]*a+127)/255)<<16)|(((p[1]*a+127)/255)<<8)|((p[2]*a+127)/255);memcpy(data+(size_t)yy*stride+xx*4,&argb,4);
+    }
+    cairo_surface_t *surface=cairo_image_surface_create_for_data(data,CAIRO_FORMAT_ARGB32,(int)w,(int)h,stride);
+    static cairo_user_data_key_t pixels_key;
+    // GTK may retain the surface after its resource ID has been released.
+    if(cairo_surface_status(surface)!=CAIRO_STATUS_SUCCESS || cairo_surface_set_user_data(surface,&pixels_key,data,g_free)!=CAIRO_STATUS_SUCCESS) {
+        cairo_surface_destroy(surface);g_free(data);return FALSE;
+    }
+    Image *image=g_new0(Image,1);image->surface=surface;
+#ifdef RUSTERIZE_SHADERS
+    image->rgba=g_bytes_new(pixels,n);
+#endif
+    uint64_t *key=g_new(uint64_t,1);*key=id;g_hash_table_replace(app->images,key,image);return TRUE;
+}
+#ifdef RUSTERIZE_SHADERS
+#include "gpu.h"
+#endif
 static gboolean replay(App *app,cairo_t *c,const uint8_t *data,size_t len) {
-    if(len<8 || memcmp(data,"RZ02",4)!=0)return FALSE;
-    Reader r={data+4,data+len,TRUE};uint32_t count=u32(&r);int depth=0;app->generation++;
+    if(!data || len<12 || memcmp(data,"RZ03",4)!=0)return FALSE;
+    Reader r={data+4,data+len,TRUE};uint32_t resources=u32(&r);
+    for(uint32_t i=0;i<resources && r.ok;i++) {
+        uint32_t op=u32(&r);uint64_t id=u64(&r);if(!r.ok)return FALSE;
+        if(op==1){if(!image_upload(app,&r,id))return FALSE;}
+        else if(op==2)g_hash_table_remove(app->images,&id);
+#ifdef RUSTERIZE_SHADERS
+        else if(op==3){if(!gpu_shader_upload(app,&r,id))return FALSE;}
+        else if(op==4)g_hash_table_remove(app->shaders,&id);
+#endif
+        else return FALSE;
+#ifdef RUSTERIZE_SHADERS
+        if(op==1 || op==3)app->resource_uploads++;
+#endif
+    }
+    uint32_t count=u32(&r);if(!r.ok)return FALSE;int depth=0;
     cairo_save(c);cairo_set_operator(c,CAIRO_OPERATOR_SOURCE);cairo_set_source_rgba(c,0,0,0,0);cairo_paint(c);cairo_set_operator(c,CAIRO_OPERATOR_OVER);
     cairo_set_line_cap(c,CAIRO_LINE_CAP_BUTT);cairo_set_line_join(c,CAIRO_LINE_JOIN_MITER);cairo_set_miter_limit(c,10);cairo_set_fill_rule(c,CAIRO_FILL_RULE_WINDING);
     for(uint32_t i=0;i<count && r.ok;i++) {
@@ -169,19 +225,16 @@ static gboolean replay(App *app,cairo_t *c,const uint8_t *data,size_t len) {
             cairo_move_to(c,x+text.offset_x,y-(op==8?(double)pango_layout_get_baseline(text.layout)/PANGO_SCALE:0));
             pango_cairo_show_layout(c,text.layout);native_text_free(&text);
         } else if(op==9) {
-            uint64_t id=u64(&r);uint32_t w=u32(&r),h=u32(&r);double x=f32(&r),y=f32(&r),dw=f32(&r),dh=f32(&r),opacity=f32(&r);uint32_t n=u32(&r);const uint8_t *pixels=bytes(&r,n);
-            if(!pixels || !w || !h || w>G_MAXINT/4 || (uint64_t)w*h*4!=n){r.ok=FALSE;break;}
+            uint64_t id=u64(&r);double x=f32(&r),y=f32(&r),dw=f32(&r),dh=f32(&r),opacity=f32(&r);
             Image *image=g_hash_table_lookup(app->images,&id);
-            if(!image) {
-                image=g_new0(Image,1);int stride=cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32,w);image->data=g_malloc0((size_t)stride*h);
-                for(uint32_t yy=0;yy<h;yy++)for(uint32_t xx=0;xx<w;xx++){
-                    const uint8_t *p=pixels+((size_t)yy*w+xx)*4;uint32_t a=p[3];uint32_t argb=(a<<24)|(((p[0]*a+127)/255)<<16)|(((p[1]*a+127)/255)<<8)|((p[2]*a+127)/255);memcpy(image->data+(size_t)yy*stride+xx*4,&argb,4);
-                }
-                image->surface=cairo_image_surface_create_for_data(image->data,CAIRO_FORMAT_ARGB32,w,h,stride);uint64_t *key=g_new(uint64_t,1);*key=id;g_hash_table_insert(app->images,key,image);
-            }
-            image->generation=app->generation;
+            if(!r.ok || !image){r.ok=FALSE;break;}
+            int w=cairo_image_surface_get_width(image->surface),h=cairo_image_surface_get_height(image->surface);
             if(dw>0 && dh>0){cairo_save(c);cairo_rectangle(c,x,y,dw,dh);cairo_clip(c);cairo_translate(c,x,y);cairo_scale(c,dw/w,dh/h);cairo_set_source_surface(c,image->surface,0,0);cairo_pattern_set_filter(cairo_get_source(c),CAIRO_FILTER_BILINEAR);cairo_pattern_set_extend(cairo_get_source(c),CAIRO_EXTEND_PAD);cairo_paint_with_alpha(c,opacity);cairo_restore(c);}
-        } else r.ok=FALSE;
+        }
+#ifdef RUSTERIZE_SHADERS
+        else if(op==11){if(!gpu_shader_draw(app,c,&r))r.ok=FALSE;}
+#endif
+        else r.ok=FALSE;
     }
     gboolean balanced=depth==0;while(depth-->0)cairo_restore(c);cairo_restore(c);
     if(r.ok && balanced && r.p==r.end) {
@@ -189,7 +242,6 @@ static gboolean replay(App *app,cairo_t *c,const uint8_t *data,size_t len) {
         if(rusterize_native_draw(app->id,c,app->area,app->window)&RUSTERIZE_FAILED)r.ok=FALSE;
         cairo_restore(c);
     }
-    g_hash_table_foreach_remove(app->images,image_unused,&app->generation);
     return r.ok && balanced && r.p==r.end && cairo_status(c)==CAIRO_STATUS_SUCCESS;
 }
 static void schedule(App *app);
@@ -213,6 +265,10 @@ static gboolean tick(GtkWidget *widget,GdkFrameClock *clock,gpointer ptr) {
 }
 static gboolean scheduled(gpointer ptr) {
     App *app=ptr;app->schedule_source=0;if(app->closing)return G_SOURCE_REMOVE;
+#ifdef RUSTERIZE_SHADERS
+    if(app->snapshot_done){begin_close(app);gtk_window_close(GTK_WINDOW(app->window));return G_SOURCE_REMOVE;}
+    if(app->self_check && app->snapshot)gtk_gl_area_queue_render(GTK_GL_AREA(app->area));
+#endif
     if(!app->failed)rusterize_poll_native(app->id);
     if(app->closing)return G_SOURCE_REMOVE;
     uint32_t flags=rusterize_status(app->id);
@@ -228,12 +284,68 @@ static void schedule(App *app) {
     // Native commands and window teardown must run after GTK finishes snapshotting.
     if(!app->closing && !app->schedule_source)app->schedule_source=g_idle_add(scheduled,app);
 }
+#ifndef RUSTERIZE_SHADERS
 static void draw(GtkDrawingArea *area,cairo_t *c,int w,int h,gpointer ptr) {
     App *app=ptr;if(app->closing)return;uint32_t flags=rusterize_frame(app->id,w,h,gtk_widget_get_scale_factor(GTK_WIDGET(area)),(g_get_monotonic_time()-app->origin)/1e6);
     if(flags&RUSTERIZE_FAILED){schedule(app);return;}
     if(!replay(app,c,rusterize_data(app->id),rusterize_len(app->id))){app->failed=TRUE;g_printerr("Invalid Rusterize display list\n");schedule(app);return;}
     schedule(app);
 }
+#else
+static gboolean draw_gpu(GtkGLArea *area,GdkGLContext *context,gpointer ptr) {
+    (void)context;App *app=ptr;if(app->closing || app->failed || app->snapshot_done)return TRUE;
+    GskRenderer *renderer=gtk_native_get_renderer(GTK_NATIVE(app->window));
+    const char *renderer_type=renderer?G_OBJECT_TYPE_NAME(renderer):"unavailable";
+    if(strcmp(renderer_type,"GskGLRenderer")!=0 && strcmp(renderer_type,"GskNglRenderer")!=0) {
+        app->failed=TRUE;g_printerr("Rusterize: GTK OpenGL renderer required for direct composition; found %s\n",renderer_type);schedule(app);return TRUE;
+    }
+    int w=gtk_widget_get_width(GTK_WIDGET(area)),h=gtk_widget_get_height(GTK_WIDGET(area));
+    int scale=gtk_widget_get_scale_factor(GTK_WIDGET(area));
+    if(w<=0 || h<=0)return TRUE;
+    if(app->self_check && app->check_step==2){w-=16;h-=16;}
+    if(app->self_check && app->check_step==3) {
+        gtk_gl_area_make_current(area);gpu_destroy(app);rusterize_reset_resources(app->id);
+    }
+    app->resource_uploads=0;
+    uint32_t flags=rusterize_frame(app->id,w,h,scale,app->snapshot?0:(g_get_monotonic_time()-app->origin)/1e6);
+    if(flags&RUSTERIZE_FAILED){schedule(app);return TRUE;}
+    /* Application callbacks may temporarily use the explicit Image renderer. */
+    gtk_gl_area_make_current(area);gtk_gl_area_attach_buffers(area);
+    if(gtk_gl_area_get_error(area) || !gpu_begin(app,w*scale,h*scale,scale)) {
+        app->failed=TRUE;g_printerr("Rusterize: unable to initialize GTK GPU composition\n");schedule(app);return TRUE;
+    }
+    cairo_t *c=cairo_create(app->gpu->surface);
+    gboolean ok=replay(app,c,rusterize_data(app->id),rusterize_len(app->id));cairo_destroy(c);
+    gtk_gl_area_make_current(area);
+    if(ok)ok=gpu_flush_layer(app);
+    if(ok && app->self_check) {
+        if(app->check_step==0)app->check_draws=app->gpu->shader_draws;
+        ok=app->check_draws>0 && app->gpu->shader_draws==app->check_draws;
+        if(app->check_step==1 || app->check_step==4)ok=ok && app->resource_uploads==0;
+        if(app->check_step==3)ok=ok && app->resource_uploads>0;
+        if(!ok)g_printerr("Rusterize GPU self-check failed at stage %u\n",app->check_step);
+    }
+    if(ok && app->snapshot && (!app->self_check || app->check_step==4)) {
+        ok=gpu_snapshot(app,app->snapshot);
+        if(ok)g_print("GPU_COMPOSITION_OK shader_draws=%u shader_readbacks=0\n",app->gpu->shader_draws);
+        if(ok && app->self_check)g_print("GPU_LIFECYCLE_OK cached_frames=2 resized_frames=1 resource_resets=1\n");
+        app->snapshot=NULL;app->snapshot_done=TRUE;app->failed=!ok;
+        /* Window destruction must be deferred until GtkGLArea finishes rendering. */
+    }
+    if(app->self_check)app->check_step++;
+    if(!ok){app->failed=TRUE;g_printerr("Rusterize: invalid GPU display list or composition failure\n");}
+    schedule(app);return TRUE;
+}
+static void gpu_unrealize(GtkWidget *widget,gpointer ptr) {
+    App *app=ptr;gtk_gl_area_make_current(GTK_GL_AREA(widget));
+    if(gtk_gl_area_get_error(GTK_GL_AREA(widget)))gdk_gl_context_clear_current();
+    gpu_destroy(app);rusterize_reset_resources(app->id);
+}
+static void gpu_realize(GtkWidget *widget,gpointer ptr) {
+    App *app=ptr;gtk_gl_area_make_current(GTK_GL_AREA(widget));GError *error=gtk_gl_area_get_error(GTK_GL_AREA(widget));
+    if(error){app->failed=TRUE;g_printerr("Rusterize GTK GPU context: %s\n",error->message);schedule(app);}
+}
+#endif
 static uint32_t mouse_button(guint b){return b==1?1:b==3?2:b==2?4:0;}
 static void pressed(GtkGestureClick *gesture,int n,double x,double y,gpointer ptr){(void)n;App *a=ptr;if(a->closing)return;uint32_t b=mouse_button(gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture)));a->buttons|=b;gtk_widget_grab_focus(a->area);event(a,1,x,y,0,0,0,a->buttons);}
 static void released(GtkGestureClick *gesture,int n,double x,double y,gpointer ptr){(void)n;App *a=ptr;a->buttons&=~mouse_button(gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture)));event(a,3,x,y,0,0,0,a->buttons);}
@@ -254,7 +366,21 @@ static void activate(GtkApplication *gtk,gpointer ptr) {
     g_signal_connect(app->window,"close-request",G_CALLBACK(window_closing),app);
     GtkWidget *header=gtk_header_bar_new();gtk_widget_add_css_class(header,"rusterize-chrome");gtk_window_set_titlebar(GTK_WINDOW(app->window),header);
     app->chrome=gtk_css_provider_new();gtk_style_context_add_provider_for_display(gtk_widget_get_display(app->window),GTK_STYLE_PROVIDER(app->chrome),GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);update_chrome(app);
-    app->area=gtk_drawing_area_new();gtk_widget_set_size_request(app->area,window_float(app,2),window_float(app,3));gtk_widget_set_focusable(app->area,TRUE);gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(app->area),draw,app,NULL);gtk_window_set_child(GTK_WINDOW(app->window),app->area);
+#ifdef RUSTERIZE_SHADERS
+    app->area=gtk_gl_area_new();gtk_gl_area_set_required_version(GTK_GL_AREA(app->area),3,0);
+#if GTK_CHECK_VERSION(4,12,0)
+    gtk_gl_area_set_allowed_apis(GTK_GL_AREA(app->area),GDK_GL_API_GLES);
+#else
+    gtk_gl_area_set_use_es(GTK_GL_AREA(app->area),TRUE);
+#endif
+    g_signal_connect(app->area,"render",G_CALLBACK(draw_gpu),app);g_signal_connect(app->area,"realize",G_CALLBACK(gpu_realize),app);g_signal_connect(app->area,"unrealize",G_CALLBACK(gpu_unrealize),app);
+#else
+    app->area=gtk_drawing_area_new();gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(app->area),draw,app,NULL);
+#endif
+    gtk_widget_set_size_request(app->area,window_float(app,2),window_float(app,3));gtk_widget_set_focusable(app->area,TRUE);gtk_window_set_child(GTK_WINDOW(app->window),app->area);
+#ifdef RUSTERIZE_SHADERS
+    if(app->snapshot)gtk_widget_set_size_request(app->area,960,680);
+#endif
 #ifdef RUSTERIZE_WEBVIEW
     g_object_ref(app->area);gtk_window_set_child(GTK_WINDOW(app->window),NULL);
     GtkWidget *overlay=gtk_overlay_new();gtk_overlay_set_child(GTK_OVERLAY(overlay),app->area);g_object_unref(app->area);
@@ -270,18 +396,38 @@ static void activate(GtkApplication *gtk,gpointer ptr) {
     gtk_window_present(GTK_WINDOW(app->window));gtk_widget_grab_focus(app->area);
 }
 int main(int argc,char **argv) {
+#ifdef RUSTERIZE_SHADERS
+    /* A Cairo/Vulkan GSK fallback can download a GLArea texture. Keep the
+     * window compositor on GL too, and reject a fallback in draw_gpu. */
+    g_setenv("GSK_RENDERER","gl",TRUE);
+#endif
     App app={0};service_app=&app;rusterize_set_native_service(native_service);app.id=rusterize_create();app.origin=g_get_monotonic_time();app.images=g_hash_table_new_full(g_int64_hash,g_int64_equal,g_free,image_free);app.keys=g_hash_table_new(g_direct_hash,g_direct_equal);
+#ifdef RUSTERIZE_SHADERS
+    app.shaders=g_hash_table_new_full(g_int64_hash,g_int64_equal,g_free,gpu_shader_free);
+    if(argc==3 && (strcmp(argv[1],"--snapshot")==0 || strcmp(argv[1],"--gpu-self-check")==0)) {
+        app.snapshot=argv[2];app.self_check=strcmp(argv[1],"--gpu-self-check")==0;
+    }
+#endif
     if(rusterize_status(app.id)&RUSTERIZE_FAILED){g_printerr("%s\n",rusterize_error(app.id));rusterize_destroy(app.id);g_hash_table_destroy(app.images);g_hash_table_destroy(app.keys);return 1;}
+#ifndef RUSTERIZE_SHADERS
     if(argc==3 && strcmp(argv[1],"--snapshot")==0){
         cairo_surface_t *surface=cairo_image_surface_create(CAIRO_FORMAT_ARGB32,960,680);cairo_t *context=cairo_create(surface);
         uint32_t status=rusterize_frame(app.id,960,680,1,0);gboolean ok=!(status&RUSTERIZE_FAILED)&&replay(&app,context,rusterize_data(app.id),rusterize_len(app.id));
         if(ok)ok=cairo_surface_write_to_png(surface,argv[2])==CAIRO_STATUS_SUCCESS;
         cairo_destroy(context);cairo_surface_destroy(surface);g_hash_table_destroy(app.images);g_hash_table_destroy(app.keys);rusterize_destroy(app.id);return ok?0:1;
     }
+#endif
     GtkApplication *gtk=gtk_application_new("dev.rusterize.app",G_APPLICATION_NON_UNIQUE);g_signal_connect(gtk,"activate",G_CALLBACK(activate),&app);
     int app_argc=(argc==2 && strcmp(argv[1],"--smoke")==0)?1:argc;
+#ifdef RUSTERIZE_SHADERS
+    if(app.snapshot)app_argc=1;
+#endif
     int code=g_application_run(G_APPLICATION(gtk),app_argc,argv);
     begin_close(&app);app.window=NULL;app.area=NULL;
     if(app.chrome){GdkDisplay *display=gdk_display_get_default();if(display)gtk_style_context_remove_provider_for_display(display,GTK_STYLE_PROVIDER(app.chrome));g_object_unref(app.chrome);}
-    g_object_unref(gtk);g_hash_table_destroy(app.images);g_hash_table_destroy(app.keys);rusterize_destroy(app.id);return app.failed?1:code;
+    g_object_unref(gtk);
+#ifdef RUSTERIZE_SHADERS
+    gpu_destroy(&app);g_hash_table_destroy(app.shaders);
+#endif
+    g_hash_table_destroy(app.images);g_hash_table_destroy(app.keys);rusterize_destroy(app.id);return app.failed?1:code;
 }

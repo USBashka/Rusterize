@@ -123,7 +123,7 @@ impl TextStyle {
 }
 
 /// Immutable, straight-alpha RGBA8 bitmap. Keep this object across frames.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Image {
     id: u64,
     width: u32,

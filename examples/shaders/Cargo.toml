@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 self-check = []
+composition-check = []
 
 [lib]
 crate-type = ["rlib", "staticlib", "cdylib"]

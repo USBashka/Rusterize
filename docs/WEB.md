@@ -1,6 +1,6 @@
 # Веб: WebAssembly и Canvas 2D
 
-Общий `Application` и `export_app!(App)` работают в браузере. Rust компилируется в `wasm32-unknown-unknown`; JavaScript-оболочка исполняет RZ02 через Canvas 2D. npm, wasm-bindgen, WebView и отдельный графический движок для сборки не нужны. Требуется современный браузер с WebAssembly, BigInt, Canvas 2D `roundRect`, Pointer Events, ResizeObserver и `Intl.Segmenter`.
+Общий `Application` и `export_app!(App)` работают в браузере. Rust компилируется в `wasm32-unknown-unknown`; JavaScript-оболочка исполняет RZ03 через Canvas 2D. npm, wasm-bindgen, WebView и отдельный графический движок для сборки не нужны. Требуется современный браузер с WebAssembly, BigInt, Canvas 2D `roundRect`, Pointer Events, ResizeObserver и `Intl.Segmenter`.
 
 ```sh
 rustup target add wasm32-unknown-unknown
@@ -14,7 +14,9 @@ python -m http.server 8000 --bind 127.0.0.1 --directory dist/web/rusterize-galle
 
 ## Рисование и текст
 
-Поддержаны все команды RZ02: очистка, save/restore, преобразования, отсечение, прямоугольники, скругления, эллипсы, кубические пути, заливки, обводки, двухцветные градиенты, RGBA-изображения, однострочный текст и `TextLayout`. Изображения кэшируются по ID и удаляются из кэша, когда исчезают из кадра. Неизвестная команда, повреждённый буфер или ошибка Rust останавливает экземпляр и передаётся `onError`.
+Поддержаны команды RZ03: очистка, save/restore, преобразования, отсечение, прямоугольники, скругления, эллипсы, кубические пути, заливки, обводки, двухцветные градиенты, RGBA-изображения, Shader, однострочный текст и `TextLayout`. Ресурсы загружаются и освобождаются отдельными операциями; повторный кадр с тем же Image передаёт только ID, положение и прозрачность. Исходники Shader также загружаются один раз. Неизвестная команда, повреждённый буфер или ошибка Rust останавливает экземпляр и передаётся `onError`.
+
+`start()` возвращает `resetResources()` для сброса кэшей и повторной загрузки ресурсов в следующем кадре. После восстановления основного Canvas 2D host вызывает его автоматически. Обычное изменение размеров Canvas не сбрасывает ресурсы.
 
 `measure_text` и `TextLayout::new` синхронно обращаются к Canvas `measureText`. Измерение и рисование используют одну раскладку. Переносы Word/Character сохраняют графемы (включая составные emoji), UTF-8 диапазоны и переводы строк CRLF/LF/CR. Слишком длинное слово переносится по графемам; одна графема может выходить за заданную ширину. Canvas выполняет shaping и bidi каждой строки. Выравнивание Left/Center/Right физическое. Подчёркивание и зачёркивание рисуются оболочкой.
 
@@ -55,7 +57,7 @@ python scripts/build.py --platform web --package rusterize-shaders
 python scripts/build.py --platform web --package rusterize-webview
 ```
 
-Feature `shaders` использует прежние `ShaderRenderer`, `ShaderParams`, `Canvas::shader` и `Image`. Naga переводит WGSL в GLSL ES 300 при сборке, браузер исполняет его через WebGL 2. Проверяются размеры и параметры; сохраняются программы, текстура и последний результат. RGBA8 с straight alpha и координатами сверху вниз возвращается через readback в обычный Canvas. Это синхронное GPU → CPU копирование; WebGPU и zero-copy здесь не используются. При недоступном WebGL 2 возвращается ошибка. На экземпляр разрешено до восьми renderers; остальные ограничения совпадают с [SHADERS.md](SHADERS.md).
+Feature `shaders` использует прежние `ShaderRenderer`, `ShaderParams`, `Canvas::shader` и `Image`. Naga переводит WGSL в GLSL ES 300 при сборке, браузер исполняет его через WebGL 2. `Canvas::shader` записывает команду; host рисует её в WebGL canvas и сразу вызывает drawImage с текущими clip/transform. RGBA-результат не читается в JavaScript или WASM. Браузер сам выбирает внутренний путь копирования, поэтому zero-copy не гарантируется. Исходники и входные изображения сохраняются до Release; потеря WebGL-контекста очищает только GPU-объекты, восстановление повторяет их загрузку и будит кадр. Явный `ShaderRenderer::render` по-прежнему возвращает Image через readback. При недоступном WebGL 2 возвращается ошибка. На экземпляр разрешено до восьми пользовательских renderers и один ленивый compositor; остальные ограничения совпадают с [SHADERS.md](SHADERS.md).
 
 Feature `webview` поддерживает Create/Destroy, LoadHtml/Navigate, bounds/visibility/focus, Reload/GoBack/GoForward и Evaluate. Iframe ограничен прямоугольником Canvas; его содержимое не входит в Canvas-снимок, transform или clip. JavaScript выключен по умолчанию. При включении применяется только `sandbox="allow-scripts"`, без `allow-same-origin`; дочерний документ не получает доступ к DOM родителя или системным сервисам приложения. `Evaluate` доступен только для LoadHtml и about:blank, через непривилегированный postMessage-мост. Результат сериализуется в JSON; Promise ожидается, исключения и тайм-аут 10 секунд возвращаются в ScriptResult. Предел — 32 WebView, 64 незавершённых скрипта на представление, 1 МиБ на результат.
 
@@ -102,4 +104,8 @@ npx --prefix target/web-tools playwright install chromium
 
 Также выполни `node scripts/check_web_features.mjs`: пиксельные самопроверки WGSL, жизненный цикл WebView, изоляция iframe, история, отмена скриптов, асинхронные результаты Rust, файлы и fullscreen. Clipboard и File System Access handles в тестах подменяются; выбор через input и скачивание проверяются настоящими браузерными механизмами. Пользовательский буфер обмена не изменяется. Обычный WebView-пример собирай без `self-check`: самопроверка закрывает экземпляр после успеха.
 
-Основные проверки используют собранный Rust fixture: пиксели RZ02, реальные браузерные события, метрики/диапазоны Unicode, idle/animation, resize/DPI, Suspend/Resume, обработку ошибки кадра и очистку обработчиков. В CI предусмотрены Chromium, Firefox и WebKit; подтверждённые локальные результаты — в [VALIDATION.md](VALIDATION.md).
+Основные проверки используют собранный Rust fixture: пиксели RZ03, реальные браузерные события, метрики/диапазоны Unicode, idle/animation, resize/DPI, Suspend/Resume, обработку ошибки кадра и очистку обработчиков. `scripts/check_web_resources.mjs` дополнительно проверяет upload/release, повторное использование текстур, прямую композицию без readPixels и восстановление WebGL-контекста. В CI предусмотрены Chromium, Firefox и WebKit; подтверждённые локальные результаты — в [VALIDATION.md](VALIDATION.md).
+
+## Медиасервисы
+
+Feature `media` подключает асинхронный Web Audio, Rust PNG/JPEG-декодер в Web Worker, типизированные файловые запросы и IndexedDB. Общий код не требует потоков WASM или std::fs. Ограничения жеста, часов, квот и ресурсов: [MEDIA.md](MEDIA.md). После сборки `rusterize-media` выполните `node scripts/check_web_media.mjs`; тест использует настоящий AudioContext, worker и хранилище.

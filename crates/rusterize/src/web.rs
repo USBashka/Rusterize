@@ -144,7 +144,7 @@ pub(crate) fn query(request: &[u8]) -> Result<Vec<u8>, Error> {
     // SAFETY: synchronous imports borrow the request and destination only during
     // the call. The bundled browser host checks both ranges and never re-enters.
     let length = unsafe { service(request.as_ptr(), request.len()) };
-    if !(4..=64 * 1024 * 1024).contains(&length) {
+    if !(4..=64 * 1024 * 1024 + 16384).contains(&length) {
         return Err(Error("invalid browser service response length".into()));
     }
     let mut response = vec![0; length];

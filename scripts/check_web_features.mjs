@@ -35,6 +35,9 @@ try {
     const instantiate=WebAssembly.instantiate;
     WebAssembly.instantiate=async(...args)=>{const result=await instantiate(...args);window.testExports=(result.instance??result).exports;return result;};
     window.drawnText=[];
+    window.shaderReadbacks=0;
+    const readPixels=WebGL2RenderingContext.prototype.readPixels;
+    WebGL2RenderingContext.prototype.readPixels=function(...args){window.shaderReadbacks++;return readPixels.apply(this,args);};
     const fillText=CanvasRenderingContext2D.prototype.fillText;
     CanvasRenderingContext2D.prototype.fillText=function(text,...args){window.drawnText.push(text);return fillText.call(this,text,...args);};
   });
@@ -52,7 +55,10 @@ try {
     await page.screenshot({path:resolve(out,`shaders-failure-${engine}.png`)}).catch(()=>{});
     throw error;
   }
-  await page.waitForFunction(()=>window.rusterize.frameCount>3);
+  const gpuBaseline=await page.evaluate(()=>({frames:window.rusterize.frameCount,reads:window.shaderReadbacks}));
+  await page.waitForFunction(n=>window.rusterize.frameCount>n+3,gpuBaseline.frames);
+  assert.equal(await page.evaluate(()=>window.shaderReadbacks),gpuBaseline.reads,'animated Canvas shaders must not use readPixels');
+  assert.ok(await page.evaluate(()=>window.testExports.rusterize_len(1n)<2048),'animated shader frames must not contain RGBA results');
   const pixels=await page.evaluate(()=>Array.from(document.querySelector('canvas').getContext('2d').getImageData(150,150,2,2).data));
   assert.ok(pixels.some((v,i)=>i%4!==3 && v>50),'shader must draw real colors');
   await page.screenshot({path:resolve(out,`shaders-${engine}.png`)});

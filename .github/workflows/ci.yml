@@ -38,11 +38,13 @@ jobs:
           python-version: '3.12'
       - run: python scripts/build.py --platform web
       - run: python scripts/build.py --platform web --package rusterize-native-api
+      - run: python scripts/build.py --platform web --package rusterize-media
+      - run: python scripts/build.py --platform web --package rusterize-minimal
       - run: cargo build --release --target wasm32-unknown-unknown -p rusterize-gallery --example web_checks --locked
       - run: cargo build --release --target wasm32-unknown-unknown -p rusterize-gallery --example web_services --locked
       - run: python scripts/build.py --platform web --package rusterize-shaders --features self-check
       - run: python scripts/build.py --platform web --package rusterize-webview --features self-check
-      - run: cargo clippy --target wasm32-unknown-unknown -p rusterize-gallery -p rusterize-native-api -p rusterize-shaders -p rusterize-webview --lib --examples --locked -- -D warnings
+      - run: cargo clippy --target wasm32-unknown-unknown -p rusterize-gallery -p rusterize-native-api -p rusterize-shaders -p rusterize-webview -p rusterize-media --lib --examples --locked -- -D warnings
       - run: npm install --prefix target/web-tools --no-save playwright@1.62.1
       - run: npx --prefix target/web-tools playwright install --with-deps ${{ matrix.browser }}
       - name: Software OpenGL for Firefox
@@ -52,14 +54,33 @@ jobs:
         env:
           NODE_PATH: ${{ github.workspace }}/target/web-tools/node_modules
           WEB_BROWSER: ${{ matrix.browser }}
+      - name: Media, Worker, import/export and IndexedDB
+        run: node scripts/check_web_media.mjs
+        env:
+          NODE_PATH: ${{ github.workspace }}/target/web-tools/node_modules
+          WEB_BROWSER: ${{ matrix.browser }}
       - run: node scripts/check_web_features.mjs
         if: matrix.browser != 'firefox'
         env:
           NODE_PATH: ${{ github.workspace }}/target/web-tools/node_modules
           WEB_BROWSER: ${{ matrix.browser }}
+      - run: node scripts/check_web_resources.mjs
+        if: matrix.browser != 'firefox'
+        env:
+          NODE_PATH: ${{ github.workspace }}/target/web-tools/node_modules
+          WEB_BROWSER: ${{ matrix.browser }}
+      - name: Portable native compositor shader math
+        if: matrix.browser == 'chromium'
+        run: |
+          node hosts/linux/check-compositor.mjs
+          node hosts/macos/check-compositor.mjs
+        env:
+          NODE_PATH: ${{ github.workspace }}/target/web-tools/node_modules
       - name: Firefox WebGL and browser services
         if: matrix.browser == 'firefox'
-        run: xvfb-run -a node scripts/check_web_features.mjs
+        run: |
+          xvfb-run -a node scripts/check_web_features.mjs
+          xvfb-run -a node scripts/check_web_resources.mjs
         env:
           NODE_PATH: ${{ github.workspace }}/target/web-tools/node_modules
           WEB_BROWSER: firefox
@@ -77,6 +98,7 @@ jobs:
           path: |
             dist/web/
             target/web-check/*.png
+            target/media-check/*.png
 
   native:
     name: Native (${{ matrix.platform }})
@@ -104,7 +126,7 @@ jobs:
           python-version: '3.12'
       - name: Linux system libraries
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libpango1.0-dev libegl1-mesa-dev libgl1-mesa-dri libwebkitgtk-6.0-dev xvfb pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libpango1.0-dev libegl1-mesa-dev libepoxy-dev libgl1-mesa-dri libwebkitgtk-6.0-dev libasound2-dev xvfb pkg-config
       - name: Allow WebKit sandbox namespaces on Ubuntu
         if: runner.os == 'Linux'
         run: |
@@ -128,6 +150,10 @@ jobs:
       - run: cargo doc --workspace --no-deps --locked
       - name: Package native app
         run: python scripts/build.py --platform ${{ matrix.platform }}
+      - name: Package media and minimal applications
+        run: |
+          python scripts/build.py --platform ${{ matrix.platform }} --package rusterize-media
+          python scripts/build.py --platform ${{ matrix.platform }} --package rusterize-minimal
       - name: Package native API example
         run: python scripts/build.py --platform ${{ matrix.platform }} --package rusterize-native-api
       - name: Package WGSL example
@@ -154,10 +180,31 @@ jobs:
         run: python scripts/check_native_webview.py dist/webview.exe
       - name: Linux WGSL snapshot
         if: runner.os == 'Linux'
-        run: dist/rusterize-shaders --snapshot dist/shaders-linux.png
+        run: xvfb-run -a dist/rusterize-shaders --snapshot dist/shaders-linux.png
+        env:
+          GTK_A11Y: none
+          GDK_BACKEND: x11
+          LIBGL_ALWAYS_SOFTWARE: '1'
       - name: macOS WGSL snapshot
         if: runner.os == 'macOS'
         run: dist/rusterize-shaders.app/Contents/MacOS/rusterize-shaders --snapshot dist/shaders-macos.png
+      - name: Build GPU composition fixture
+        if: runner.os != 'Windows'
+        run: python scripts/build.py --platform ${{ matrix.platform }} --package rusterize-shaders --features composition-check --out target/composition-check
+      - name: Linux GPU composition pixels and lifecycle
+        if: runner.os == 'Linux'
+        run: |
+          xvfb-run -a target/composition-check/rusterize-shaders --gpu-self-check dist/composition-linux.png
+          python scripts/check_gpu_snapshot.py dist/composition-linux.png
+        env:
+          GTK_A11Y: none
+          GDK_BACKEND: x11
+          LIBGL_ALWAYS_SOFTWARE: '1'
+      - name: macOS GPU composition pixels and lifecycle
+        if: runner.os == 'macOS'
+        run: |
+          target/composition-check/rusterize-shaders.app/Contents/MacOS/rusterize-shaders --gpu-self-check dist/composition-macos.png
+          python scripts/check_gpu_snapshot.py dist/composition-macos.png
       - name: Linux text layout self-check and snapshot
         if: runner.os == 'Linux'
         run: dist/rusterize-native-api --snapshot dist/native-api-linux.png
@@ -229,6 +276,8 @@ jobs:
         run: python3 scripts/build.py --platform android --ndk "$ANDROID_HOME/ndk/27.2.12479018" --abi arm64-v8a --abi x86_64
       - name: Build native API example
         run: python3 scripts/build.py --platform android --package rusterize-native-api --ndk "$ANDROID_HOME/ndk/27.2.12479018" --abi arm64-v8a --abi x86_64
+      - name: Build media example with AAudio
+        run: python3 scripts/build.py --platform android --package rusterize-media --ndk "$ANDROID_HOME/ndk/27.2.12479018" --abi arm64-v8a --abi x86_64
       - name: Build WGSL example
         run: python3 scripts/build.py --platform android --package rusterize-shaders --ndk "$ANDROID_HOME/ndk/27.2.12479018" --abi arm64-v8a --abi x86_64
       - name: Build WebView example
@@ -250,3 +299,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.85.0
       - run: cargo test -p rusterize --no-default-features --locked
       - run: cargo test -p rusterize-shader-build --locked
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - run: cargo check -p rusterize --no-default-features --features media --locked

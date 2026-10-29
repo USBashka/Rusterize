@@ -57,6 +57,8 @@ pub struct App {
     time: f32,
     paused: bool,
     error: Option<String>,
+    #[cfg(feature = "composition-check")]
+    test_texture: Option<Image>,
 }
 impl Application for App {
     fn window_options(&self) -> WindowOptions {
@@ -108,36 +110,91 @@ impl Application for App {
             c.text(error, (24.0, 48.0), TextStyle::new(16.0, Color::WHITE));
             return;
         }
-        let width = (viewport.size.width - 48.0).max(1.0);
-        let height = (viewport.size.height - 132.0).max(1.0);
-        let rect = Rect::new(24.0, 76.0, width, height);
-        c.text("Волны", (24.0, 46.0), TextStyle::new(28.0, Color::WHITE));
-        c.with_save(|c| {
-            c.clip(Shape::RoundedRect(rect, 24.0));
-            c.shader(
-                self.renderer.as_mut().unwrap(),
-                rect,
-                viewport.scale,
-                &WAVE.shader(ShaderParams {
-                    time: self.time,
-                    ..Default::default()
-                }),
-            );
+        #[cfg(feature = "composition-check")]
+        {
+            let image = self.test_texture.get_or_insert_with(|| {
+                Image::rgba(
+                    2,
+                    2,
+                    vec![
+                        255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 128,
+                    ],
+                )
+                .unwrap()
+            });
+            composition_check(c, self.renderer.as_mut().unwrap(), image, viewport.scale);
+        }
+        #[cfg(not(feature = "composition-check"))]
+        {
+            let width = (viewport.size.width - 48.0).max(1.0);
+            let height = (viewport.size.height - 132.0).max(1.0);
+            let rect = Rect::new(24.0, 76.0, width, height);
+            c.text("Волны", (24.0, 46.0), TextStyle::new(28.0, Color::WHITE));
+            c.with_save(|c| {
+                c.clip(Shape::RoundedRect(rect, 24.0));
+                c.shader(
+                    self.renderer.as_mut().unwrap(),
+                    rect,
+                    viewport.scale,
+                    &WAVE.shader(ShaderParams {
+                        time: self.time,
+                        ..Default::default()
+                    }),
+                );
+                c.text(
+                    "WGSL",
+                    (rect.x + 24.0, rect.y + 48.0),
+                    TextStyle::new(26.0, Color::WHITE).bold(),
+                );
+            });
             c.text(
-                "WGSL",
-                (rect.x + 24.0, rect.y + 48.0),
-                TextStyle::new(26.0, Color::WHITE).bold(),
+                if self.paused {
+                    "Продолжить"
+                } else {
+                    "Пауза"
+                },
+                (24.0, viewport.size.height - 22.0),
+                TextStyle::new(16.0, Color::hex(0xbac6da)),
             );
-        });
-        c.text(
-            if self.paused {
-                "Продолжить"
-            } else {
-                "Пауза"
-            },
-            (24.0, viewport.size.height - 22.0),
-            TextStyle::new(16.0, Color::hex(0xbac6da)),
-        );
+        }
     }
+}
+
+/// Deterministic scene for native-host pixel checks. Normal builds keep the demo.
+#[cfg(feature = "composition-check")]
+fn composition_check(c: &mut Canvas<'_>, renderer: &mut ShaderRenderer, image: &Image, scale: f32) {
+    // The caller already cleared the frame; this opaque background intentionally
+    // exercises normal canvas content before, between and after GPU commands.
+    c.fill_rect(Rect::new(0.0, 0.0, 128.0, 96.0), Color::WHITE);
+    let uv = UV.shader(ShaderParams {
+        data: [[0.25, 0.5, 0.0, 0.0], [0.0; 4], [0.0; 4], [0.0; 4]],
+        ..Default::default()
+    });
+    c.shader(renderer, Rect::new(8.0, 8.0, 16.0, 16.0), scale, &uv);
+    c.with_save(|c| {
+        c.translate(40.0, 8.0);
+        c.clip(
+            Path::builder()
+                .move_to((0.0, 0.0))
+                .line_to((16.0, 0.0))
+                .line_to((0.0, 16.0))
+                .close()
+                .build(),
+        );
+        c.shader(renderer, Rect::new(0.0, 0.0, 16.0, 16.0), scale, &uv);
+    });
+    c.fill_rect(Rect::new(12.0, 12.0, 2.0, 2.0), Color::BLACK);
+    let input = TEXTURE
+        .shader(ShaderParams {
+            data: [[1.0; 4], [0.0; 4], [0.0; 4], [0.0; 4]],
+            ..Default::default()
+        })
+        .with_image(image);
+    c.shader(renderer, Rect::new(8.0, 40.0, 16.0, 16.0), scale, &input);
+    c.with_save(|c| {
+        c.translate(64.0, 40.0);
+        c.transform(Transform([0.0, 1.0, -1.0, 0.0, 0.0, 0.0]));
+        c.shader(renderer, Rect::new(0.0, 0.0, 16.0, 16.0), scale, &input);
+    });
 }
 rusterize::export_app!(App);

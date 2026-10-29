@@ -57,17 +57,17 @@ fn event(&mut self, event: Event, context: &mut Context) {
 }
 ```
 
-Каждый метод возвращает `RequestId`. `Event::NativeResult` содержит `Result<NativeResponse, Error>`; ответ — `Done`, `Text`, `Paths` или `Cancelled`. Отмена диалога не является ошибкой. Выбор имени в Save-диалоге **не записывает файл**. Эти операции выполняются после выхода из обработчика приложения; вложенный цикл диалога может обрабатывать события окна. Не запускай модальные диалоги напрямую в `draw`, `native_draw` или `native_event`.
+Каждый метод возвращает `RequestId`. `Event::NativeResult` содержит `Result<NativeResponse, Error>`; ответ старых операций — `Done`, `Text`, `Paths` или `Cancelled`. Медиамодули добавляют `Bytes`, `Missing`, `Files`, `Audio`, `Image`: [контракты](MEDIA.md). Legacy `Paths` на Android может содержать content URI; для переносимого кода используйте `select_file` и типизированный FileLocation. Отмена диалога не является ошибкой. Выбор имени в Save-диалоге **не записывает файл**. Эти операции выполняются после выхода из обработчика приложения; вложенный цикл диалога может обрабатывать события окна. Не запускай модальные диалоги напрямую в `draw`, `native_draw` или `native_event`.
 
 | Методы Context | Windows | GTK | AppKit | Android |
 | --- | --- | --- | --- | --- |
 | `read_clipboard`, `write_clipboard` | Unicode clipboard | GdkClipboard | NSPasteboard | ClipboardManager |
 | `set_cursor` | Win32 | GDK | NSCursor | PointerIcon |
-| `set_window_state` | Normal / Minimized / Maximized / Fullscreen | Те же состояния | Те же состояния | Ошибка Unsupported |
+| `set_window_state` | Normal / Minimized / Maximized / Fullscreen | Те же состояния | Те же состояния | Normal / Fullscreen; остальные — ошибка |
 | `set_window_size` | Размер клиентской области | Запрос размера окна | Размер content view | Ошибка Unsupported |
 | `set_window_position` | Координаты рабочего стола в физических пикселях | Ошибка: GTK4/Wayland не даёт общего API | Логические координаты, начало сверху основного экрана | Ошибка Unsupported |
 | `set_always_on_top` | Win32 topmost | Ошибка: нет общего API GTK4/Wayland | Уровень floating | Ошибка Unsupported |
-| `file_dialog` | IFileDialog: открыть, сохранить, выбрать каталог | GtkFileChooserNative | NSOpenPanel / NSSavePanel | Пока не подключён Activity Result API |
+| `file_dialog` | IFileDialog: открыть, сохранить, выбрать каталог | GtkFileChooserNative | NSOpenPanel / NSSavePanel | ACTION_OPEN_DOCUMENT / CREATE_DOCUMENT / OPEN_DOCUMENT_TREE |
 | `message_dialog` | MessageBox | GtkMessageDialog | NSAlert | AlertDialog |
 | `open_uri` | ShellExecute | GAppInfo | NSWorkspace | ACTION_VIEW |
 

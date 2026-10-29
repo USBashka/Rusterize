@@ -14,21 +14,43 @@ fn near(value: u8, expected: u8) {
 
 #[test]
 #[ignore = "Requires a native graphics driver; run --test gpu -- --ignored"]
+#[cfg(not(feature = "composition-check"))]
 fn demo_pause_resize_and_resume_preserve_state() {
-    fn image(scene: &Scene) -> Image {
+    fn image(scene: &Scene, renderer: &mut ShaderRenderer) -> Image {
         scene
             .commands()
             .iter()
             .find_map(|command| match command {
                 Command::Image { image, .. } => Some(image.clone()),
+                Command::Shader {
+                    source,
+                    params,
+                    image,
+                    size,
+                    scale,
+                    ..
+                } => Some(
+                    renderer
+                        .render(
+                            &Shader {
+                                source,
+                                params: *params,
+                                image: image.as_ref(),
+                            },
+                            *size,
+                            *scale,
+                        )
+                        .unwrap(),
+                ),
                 _ => None,
             })
             .expect("demo must draw its shader, not an error message")
     }
+    let mut renderer = ShaderRenderer::new().unwrap();
     let mut engine = Engine::new(rusterize_shaders::App::default());
     engine.dispatch(Event::Resize(Viewport::new(320.0, 240.0, 1.0)));
-    let first = image(engine.frame(0.0).unwrap());
-    let animated = image(engine.frame(0.05).unwrap());
+    let first = image(engine.frame(0.0).unwrap(), &mut renderer);
+    let animated = image(engine.frame(0.05).unwrap(), &mut renderer);
     assert_ne!(first.pixels(), animated.pixels());
     engine.dispatch(Event::Key {
         key: Key::Space,
@@ -37,13 +59,19 @@ fn demo_pause_resize_and_resume_preserve_state() {
         modifiers: Modifiers::default(),
     });
     assert!(!engine.is_animating());
-    let paused = image(engine.frame(0.1).unwrap());
-    assert_eq!(paused.id(), image(engine.frame(0.2).unwrap()).id());
+    let paused = image(engine.frame(0.1).unwrap(), &mut renderer);
+    assert_eq!(
+        paused.id(),
+        image(engine.frame(0.2).unwrap(), &mut renderer).id()
+    );
     assert!(!engine.needs_redraw());
     engine.dispatch(Event::Suspend);
     engine.dispatch(Event::Resume);
     assert!(!engine.is_animating());
-    assert_eq!(paused.pixels(), image(engine.frame(0.3).unwrap()).pixels());
+    assert_eq!(
+        paused.pixels(),
+        image(engine.frame(0.3).unwrap(), &mut renderer).pixels()
+    );
     engine.dispatch(Event::Pointer {
         id: 0,
         phase: PointerPhase::Up,
@@ -52,7 +80,7 @@ fn demo_pause_resize_and_resume_preserve_state() {
     });
     assert!(engine.is_animating());
     engine.dispatch(Event::Resize(Viewport::new(400.0, 300.0, 1.5)));
-    let resized = image(engine.frame(0.4).unwrap());
+    let resized = image(engine.frame(0.4).unwrap(), &mut renderer);
     assert_eq!((resized.width(), resized.height()), (528, 252));
 }
 
@@ -227,10 +255,10 @@ fn invalid_requests_fail_and_canvas_retains_its_atomic_frame_contract() {
         &WAVE.shader(ShaderParams::default()),
     );
     c.finish().unwrap();
-    let Command::Image { image, .. } = &scene.commands()[0] else {
-        panic!("shader must use the native Image contract")
+    let Command::Shader { size, .. } = &scene.commands()[0] else {
+        panic!("shader must remain a deferred GPU draw")
     };
-    assert_eq!((image.width(), image.height()), (30, 15));
+    assert_eq!(*size, [30, 15]);
 }
 
 #[cfg(windows)]
@@ -267,5 +295,191 @@ fn native_compositor_preserves_clip_transform_order_and_alpha() {
         let pos = ((6.0 * scale) as usize * width + (6.0 * scale) as usize) * 4;
         near(bgra[pos], 159);
         assert_eq!(bgra[pos + 3], 255);
+    }
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "Requires a D3D11 driver with WGL_NV_DX_interop2"]
+fn shared_gpu_compositor_matches_readback_with_multiple_shaders_and_clips() {
+    use windows::api::{
+        core::Interface,
+        Win32::{
+            Foundation::HMODULE,
+            Graphics::{
+                Direct2D::{Common::*, *},
+                Direct3D::*,
+                Direct3D11::*,
+                Dxgi::{Common::*, *},
+            },
+        },
+    };
+    unsafe {
+        let mut device = None;
+        D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            None,
+        )
+        .unwrap();
+        let device = device.unwrap();
+        let immediate = device.GetImmediateContext().unwrap();
+        let description = D3D11_TEXTURE2D_DESC {
+            Width: 32,
+            Height: 32,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE).0 as u32,
+            ..Default::default()
+        };
+        let mut output = None;
+        device
+            .CreateTexture2D(&description, None, Some(&mut output))
+            .unwrap();
+        let output = output.unwrap();
+        let factory: ID2D1Factory1 =
+            D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).unwrap();
+        let context = factory
+            .CreateDevice(&device.cast::<IDXGIDevice>().unwrap())
+            .unwrap()
+            .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)
+            .unwrap();
+        let bitmap = context
+            .CreateBitmapFromDxgiSurface(
+                &output.cast::<IDXGISurface>().unwrap(),
+                Some(&D2D1_BITMAP_PROPERTIES1 {
+                    pixelFormat: D2D1_PIXEL_FORMAT {
+                        format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                        alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                    },
+                    dpiX: 96.0,
+                    dpiY: 96.0,
+                    bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        context.SetTarget(&bitmap);
+        let mut compositor =
+            windows::D2dRenderer::new_gpu(factory.cast().unwrap(), context, device.clone())
+                .unwrap();
+        let mut gpu = ShaderRenderer::new().unwrap();
+        eprintln!("Shared shader driver: {}", gpu.renderer_name());
+        let source = Image::rgba(
+            2,
+            2,
+            vec![
+                255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 64, 255, 255, 255, 0,
+            ],
+        )
+        .unwrap();
+        let mut staging = None;
+        device
+            .CreateTexture2D(
+                &D3D11_TEXTURE2D_DESC {
+                    Usage: D3D11_USAGE_STAGING,
+                    BindFlags: 0,
+                    CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                    ..description
+                },
+                None,
+                Some(&mut staging),
+            )
+            .unwrap();
+        let staging = staging.unwrap();
+        for frame in 0..3 {
+            let mut scene = Scene::default();
+            let mut c = Canvas::new(&mut scene);
+            c.clear(if frame == 0 {
+                Color::TRANSPARENT
+            } else {
+                Color::WHITE
+            });
+            let params = ShaderParams {
+                data: [
+                    [0.25 + frame as f32 * 0.2, 0.5, 0.0, 0.0],
+                    [0.0; 4],
+                    [0.0; 4],
+                    [0.0; 4],
+                ],
+                ..Default::default()
+            };
+            c.with_save(|c| {
+                c.translate(4.0, 4.0);
+                c.clip(Rect::new(0.0, 0.0, 10.0, 10.0));
+                c.shader(
+                    &mut gpu,
+                    Rect::new(0.0, 0.0, 16.0, 16.0),
+                    1.0,
+                    &UV.shader(params),
+                );
+                c.shader(
+                    &mut gpu,
+                    Rect::new(2.0, 2.0, 6.0, 6.0),
+                    1.0,
+                    &TEXTURE
+                        .shader(ShaderParams {
+                            data: [[1.0; 4], [0.0; 4], [0.0; 4], [0.0; 4]],
+                            ..Default::default()
+                        })
+                        .with_image(&source),
+                );
+            });
+            c.shader(
+                &mut gpu,
+                Rect::new(18.0, 2.0, 8.0 + frame as f32, 8.0),
+                1.0,
+                &UV.shader(ShaderParams {
+                    data: [[0.9, 0.75, 0.0, 0.0], [0.0; 4], [0.0; 4], [0.0; 4]],
+                    ..Default::default()
+                }),
+            );
+            c.fill_rect(Rect::new(5.0, 5.0, 1.0, 1.0), Color::BLACK);
+            c.finish().unwrap();
+            compositor
+                .render(&scene, Viewport::new(32.0, 32.0, 1.0))
+                .unwrap();
+            assert_eq!(
+                compositor.gpu_shader_draws(),
+                3,
+                "test requires actual shared GPU textures, not the fallback"
+            );
+            let expected = windows::render_offscreen(&scene, 32, 32, 1.0).unwrap();
+            // Readback belongs only to this test's final screenshot, never to a shader draw.
+            immediate.CopyResource(&staging, &output);
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            immediate
+                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .unwrap();
+            let mut actual = Vec::with_capacity(32 * 32 * 4);
+            for y in 0..32usize {
+                actual.extend_from_slice(std::slice::from_raw_parts(
+                    (mapped.pData as *const u8).add(y * mapped.RowPitch as usize),
+                    32 * 4,
+                ));
+            }
+            immediate.Unmap(&staging, 0);
+            for (i, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+                assert!(
+                    (*actual as i32 - *expected as i32).abs() <= 3,
+                    "frame {frame}, pixel ({}, {}), channel {}: {actual} != {expected}",
+                    i / 4 % 32,
+                    i / 4 / 32,
+                    i % 4
+                );
+            }
+        }
     }
 }

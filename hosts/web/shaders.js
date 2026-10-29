@@ -1,15 +1,18 @@
 import { Writer } from './wire.js';
 
 class GPU {
-  constructor() {
+  constructor(wake = () => {}) {
     this.canvas = document.createElement('canvas');
     this.gl = this.canvas.getContext('webgl2', { alpha:true, premultipliedAlpha:false, antialias:false, depth:false, stencil:false });
     if (!this.gl) throw new Error('WebGL 2 is unavailable');
     this.max = Math.min(4096, this.gl.getParameter(this.gl.MAX_TEXTURE_SIZE));
     this.name = `${this.gl.getParameter(this.gl.RENDERER)} / ${this.gl.getParameter(this.gl.VERSION)}`;
     this.programs = new Map();
-    this.lost = e => { e.preventDefault(); this.resources = null; this.programs.clear(); };
+    this.textures = new Map();
+    this.lost = e => { e.preventDefault(); this.resources = null; this.programs.clear(); this.textures.clear(); };
+    this.restored = () => wake();
     this.canvas.addEventListener('webglcontextlost', this.lost);
+    this.canvas.addEventListener('webglcontextrestored', this.restored);
   }
   check() {
     if (this.gl.isContextLost()) throw new Error('WebGL context lost; retry after restoration');
@@ -65,12 +68,15 @@ class GPU {
     this.programs.set(id,program); return program;
   }
   render(r) {
-    this.init();
     const id = r.u32(), sources = [r.string(),r.string(),r.string(),r.string()];
     const values = Float32Array.from({length:20},()=>r.f32());
-    const [width,height] = values;
     const imageId = r.u64(), iw = r.u32(), ih = r.u32(), pixels = r.take(r.u32());
     r.done();
+    return this.draw(id, sources, values, imageId, {width:iw, height:ih, pixels}, false);
+  }
+  draw(id, sources, values, imageId, image, direct) {
+    this.init();
+    const [width,height] = values, {width:iw, height:ih, pixels} = image;
     if (![width,height,iw,ih].every(n => Number.isInteger(n) && n > 0 && n <= this.max) ||
         width * height > 4194304 || iw * ih * 4 !== pixels.length || values[3] <= 0)
       throw new Error('Invalid WebGL dimensions or parameters');
@@ -79,6 +85,11 @@ class GPU {
     g.useProgram(program); g.bindVertexArray(q.vao);
     g.bindBuffer(g.UNIFORM_BUFFER,q.uniform); g.bufferData(g.UNIFORM_BUFFER,values,g.DYNAMIC_DRAW);
     g.bindBufferBase(g.UNIFORM_BUFFER,0,q.uniform);
+    if (direct) {
+      if (this.canvas.width !== width) this.canvas.width = width;
+      if (this.canvas.height !== height) this.canvas.height = height;
+      g.bindFramebuffer(g.FRAMEBUFFER,null);
+    } else {
     if (width !== this.size[0] || height !== this.size[1]) {
       g.bindTexture(g.TEXTURE_2D,q.output);
       g.texImage2D(g.TEXTURE_2D,0,g.RGBA8,width,height,0,g.RGBA,g.UNSIGNED_BYTE,null);
@@ -87,16 +98,30 @@ class GPU {
     g.bindFramebuffer(g.FRAMEBUFFER,q.fbo);
     g.framebufferTexture2D(g.FRAMEBUFFER,g.COLOR_ATTACHMENT0,g.TEXTURE_2D,q.output,0);
     if (g.checkFramebufferStatus(g.FRAMEBUFFER) !== g.FRAMEBUFFER_COMPLETE) throw new Error('Incomplete WebGL framebuffer');
-    g.activeTexture(g.TEXTURE0); g.bindTexture(g.TEXTURE_2D,q.input);
-    if (this.inputId !== imageId) {
+    }
+    g.activeTexture(g.TEXTURE0);
+    let texture = direct ? this.textures.get(imageId) : q.input;
+    const upload = direct ? !texture : this.inputId !== imageId;
+    if (!texture) {
+      texture = g.createTexture();
+      if (!texture) throw new Error('WebGL texture allocation failed');
+      this.textures.set(imageId,texture);
+    }
+    g.bindTexture(g.TEXTURE_2D,texture);
+    if (upload) {
+      g.texParameteri(g.TEXTURE_2D,g.TEXTURE_MIN_FILTER,g.LINEAR);
+      g.texParameteri(g.TEXTURE_2D,g.TEXTURE_MAG_FILTER,g.LINEAR);
+      g.texParameteri(g.TEXTURE_2D,g.TEXTURE_WRAP_S,g.CLAMP_TO_EDGE);
+      g.texParameteri(g.TEXTURE_2D,g.TEXTURE_WRAP_T,g.CLAMP_TO_EDGE);
       g.pixelStorei(g.UNPACK_ALIGNMENT,1);
       g.pixelStorei(g.UNPACK_PREMULTIPLY_ALPHA_WEBGL,false);
       g.texImage2D(g.TEXTURE_2D,0,g.RGBA8,iw,ih,0,g.RGBA,g.UNSIGNED_BYTE,pixels);
-      this.inputId = imageId;
+      if (!direct) this.inputId = imageId;
     }
     g.viewport(0,0,width,height);
     for (const flag of [g.BLEND,g.DEPTH_TEST,g.SCISSOR_TEST,g.DITHER]) g.disable(flag);
     g.clearColor(0,0,0,0); g.clear(g.COLOR_BUFFER_BIT); g.drawArrays(g.TRIANGLES,0,3);
+    if (direct) { this.check(); return this.canvas; }
     const output = new Uint8Array(width*height*4);
     g.pixelStorei(g.PACK_ALIGNMENT,1); g.readPixels(0,0,width,height,g.RGBA,g.UNSIGNED_BYTE,output);
     this.check();
@@ -107,18 +132,42 @@ class GPU {
     }
     return output;
   }
+  releaseImage(id) {
+    const texture = this.textures.get(id);
+    if (texture) { this.gl.deleteTexture(texture); this.textures.delete(id); }
+  }
+  releaseSource(id) {
+    const program = this.programs.get(id);
+    if (program) { this.gl.deleteProgram(program); this.programs.delete(id); }
+  }
   destroy() {
     const g=this.gl,q=this.resources;
     for (const p of this.programs.values()) g.deleteProgram(p);
+    for (const texture of this.textures.values()) g.deleteTexture(texture);
     if (q) { g.deleteVertexArray(q.vao); g.deleteBuffer(q.uniform); g.deleteFramebuffer(q.fbo); g.deleteTexture(q.input); g.deleteTexture(q.output); }
-    this.programs.clear(); this.resources=null;
+    this.programs.clear(); this.textures.clear(); this.resources=null;
     this.canvas.removeEventListener('webglcontextlost',this.lost);
+    this.canvas.removeEventListener('webglcontextrestored',this.restored);
     g.getExtension('WEBGL_lose_context')?.loseContext();
   }
 }
 
 export class Shaders {
-  constructor() { this.contexts=new Map(); this.next=1; }
+  constructor(wake = () => {}) { this.contexts=new Map(); this.next=1; this.sources=new Map(); this.wake=wake; }
+  uploadSource(id, sources) { this.compositor?.releaseSource(id); this.sources.set(id,sources); }
+  releaseSource(id) { this.sources.delete(id); this.compositor?.releaseSource(id); }
+  releaseImage(id) { this.compositor?.releaseImage(id); }
+  draw(ctx, id, values, imageId, image, destination) {
+    const source = this.sources.get(id);
+    if (!source) throw new Error('Unknown Rusterize shader resource');
+    this.compositor ??= new GPU(() => this.wake());
+    // Retain source/bitmap resources while WebGL restores its device objects.
+    if (this.compositor.gl.isContextLost()) return;
+    const input = imageId === 0n ? {width:1,height:1,pixels:new Uint8Array([255,255,255,255])} : image;
+    if (!input) throw new Error('Unknown Rusterize shader image');
+    const canvas = this.compositor.draw(id,source,values,imageId,input,true);
+    ctx.drawImage(canvas,...destination);
+  }
   execute(op,r) {
     if (op===30) {
       if (this.contexts.size>=8) throw new Error('At most eight WebGL renderers per application');
@@ -131,5 +180,5 @@ export class Shaders {
     if (op===32) { gpu.destroy(); this.contexts.delete(id); return new Uint8Array(); }
     throw new Error('Unknown GPU operation');
   }
-  destroy() { for (const gpu of this.contexts.values()) gpu.destroy(); this.contexts.clear(); }
+  destroy() { for (const gpu of this.contexts.values()) gpu.destroy(); this.contexts.clear(); this.compositor?.destroy(); this.compositor=null; this.sources.clear(); }
 }

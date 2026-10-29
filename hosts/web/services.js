@@ -2,16 +2,19 @@ import { Reader, Writer, encoder } from './wire.js';
 import { WebViews } from './webviews.js';
 import { Shaders } from './shaders.js';
 import { Files } from './files.js';
+import { Media, Storage } from './media.js';
 
 export class BrowserServices {
-  constructor(canvas,text,wake) {
+  constructor(canvas,text,wake,shaders = new Shaders(),wasmUrl = new URL('./app.wasm',import.meta.url).href) {
     this.canvas=canvas; this.text=text; this.wake=wake; this.responses=[];
     this.cancelled=new Set(); this.closed=false; this.dialogs=new Set();
-    this.webviews=new WebViews(canvas,wake); this.shaders=new Shaders(); this.files=new Files();
+    this.webviews=new WebViews(canvas,wake); this.shaders=shaders; this.files=new Files();
+    this.media=new Media(wake,wasmUrl);this.storage=new Storage();
   }
   capabilities() {
     return 1|4|128|256|512|1024|(navigator.clipboard?.readText && navigator.clipboard?.writeText?2:0)|
-      (document.fullscreenEnabled && document.documentElement.requestFullscreen?8:0);
+      (document.fullscreenEnabled && document.documentElement.requestFullscreen?8:0)|
+      (globalThis.AudioContext||globalThis.webkitAudioContext?2048:0)|(globalThis.Worker?4096:0)|8192|(globalThis.indexedDB?16384:0);
   }
   sync(bytes) {
     const r=new Reader(bytes),op=r.u32(); let payload;
@@ -22,6 +25,8 @@ export class BrowserServices {
       const app=r.u64(),index=this.responses.findIndex(item=>item.app===app);
       payload=index<0?new Writer().u32(0).finish():this.responses.splice(index,1)[0].bytes;
     } else if(op>=30 && op<=32) payload=this.shaders.execute(op,r);
+    else if(op>=70 && op<=80) payload=this.media.sync(op,r);
+    else if(op===48 || op===49) {payload=new Uint8Array(8);new DataView(payload.buffer).setFloat64(0,(op===48?Date.now():performance.now())/1000,true);}
     else throw new Error('Unsupported synchronous browser operation');
     r.done(); return payload;
   }
@@ -36,7 +41,7 @@ export class BrowserServices {
   }
   complete(app,id,status,payload) {
     if(this.closed || this.cancelled.has(app)) return;
-    if(payload.length>32*1024*1024+16384) { status=1; payload=encoder.encode('Browser response is too large'); }
+    if(payload.length>64*1024*1024+16384) { status=1; payload=encoder.encode('Browser response is too large'); }
     this.responses.push({app,bytes:new Writer().u32(1).u64(id).u32(status).raw(payload).finish()});
     this.wake();
   }
@@ -84,6 +89,13 @@ export class BrowserServices {
         return this.files.execute(op,token,data);
       }
       case 20: return this.webviews.execute(r);
+      case 40: case 41: case 44: {
+        const kind=r.u32(),token=r.string(),bytes=op===41?r.take(r.u32()).slice():undefined;r.done();
+        if(kind!==2)throw new Error('The browser requires a browser file token');
+        return this.files.execute(op===40?13:op===41?14:16,token,bytes);
+      }
+      case 42: case 43:{const app=r.string(),key=r.string(),bytes=op===43?r.take(r.u32()).slice():undefined;r.done();return this.storage.execute(op,app,key,bytes);}
+      case 50: case 51:{const bytes=r.take(r.u32()).slice();r.done();return op===50?this.media.decodeImage(bytes):this.media.decodeAudio(bytes);}
       default: throw new Error('Unknown asynchronous browser operation');
     }
     r.done(); return result;
@@ -102,6 +114,7 @@ export class BrowserServices {
   destroy() {
     this.closed=true; this.responses=[]; for(const close of [...this.dialogs]) close();
     this.webviews.destroy(); this.shaders.destroy(); this.files.destroy();
+    this.media.destroy();this.storage.destroy();
     if(this.fullscreen && document.fullscreenElement) document.exitFullscreen().catch(()=>{});
   }
 }

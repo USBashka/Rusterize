@@ -15,11 +15,16 @@ uint32_t rusterize_poll_native(uint64_t id);
 uint32_t rusterize_native_draw(uint64_t id, void *context, void *view, void *window);
 void rusterize_destroy(uint64_t id);
 uint32_t rusterize_status(uint64_t id);
+/* Clear the receiver's resource cache before calling this after a dropped frame
+ * or cache loss. Invalidates data/len and requests a redraw; the next frame
+ * uploads all live resources. Returns the same status flags as status(). */
+uint32_t rusterize_reset_resources(uint64_t id);
 const char *rusterize_title(uint64_t id);
 /* 0..3: f32 bits of width,height,min_width,min_height. 4..6: RGB titlebar,
  * text,border colour (UINT32_MAX=OS default). 7: resizable. 8: revision. */
 uint32_t rusterize_window_option(uint64_t id, uint32_t option);
 uint32_t rusterize_event(uint64_t id, uint32_t kind, float x, float y, float dx, float dy, uint32_t detail, uint32_t flags);
+/* Replay every RZ03 frame in order, including its resource operations. */
 uint32_t rusterize_frame(uint64_t id, float width, float height, float scale, double seconds);
 const uint8_t *rusterize_data(uint64_t id);
 size_t rusterize_len(uint64_t id);

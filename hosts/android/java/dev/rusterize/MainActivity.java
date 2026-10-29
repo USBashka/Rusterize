@@ -29,6 +29,7 @@ public final class MainActivity extends Activity {
         view.requestFocus();
     }
     @Override protected void onResume() { super.onResume(); if (view != null) view.resume(); }
+    @Override protected void onActivityResult(int request,int result,android.content.Intent data){super.onActivityResult(request,result,data);if(request==NativeFiles.PICKER&&view!=null)view.documentResult(result,data);}
     @Override protected void onPause() { if (view != null) view.suspend(); super.onPause(); }
     @Override protected void onDestroy() { if (view != null) view.close(); super.onDestroy(); }
 }

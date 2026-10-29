@@ -17,7 +17,7 @@ Rust-фреймворк для приложений с доступом к во�
 | macOS 11+ | Core Graphics + TextKit | AppKit, Swift |
 | Веб | Canvas 2D | WebAssembly + JavaScript |
 
-По умолчанию приложение использует нативный Canvas. Опциональная feature `webview` добавляет системный WebView без поставки браузерного движка. Копия Skia или Chromium в приложение не включается. Android сам использует свой системный графический стек. GTK/Cairo/Pango в Linux устанавливаются как системные зависимости. Rust-ядро без нативного Windows-бэкенда и опциональных features `shaders`/`webview` не имеет сторонних зависимостей на настольных ОС.
+По умолчанию приложение использует нативный Canvas. Опциональная feature `webview` добавляет системный WebView без поставки браузерного движка. Копия Skia или Chromium в приложение не включается. Android сам использует свой системный графический стек. GTK/Cairo/Pango в Linux устанавливаются как системные зависимости. Rust-ядро без нативного Windows-бэкенда и опциональных features `shaders`/`webview`/`media` не имеет сторонних зависимостей на настольных ОС.
 
 Это первая версия 0.1. Статус реальных проверок, размеры файлов и ограничения перечислены в [VALIDATION.md](docs/VALIDATION.md). Наличие адаптера не означает, что он проверен на всех устройствах.
 
@@ -58,6 +58,17 @@ python -m http.server 8000 --bind 127.0.0.1 --directory dist/web/rusterize-galle
 Android APK подписывается локальным **отладочным** ключом для установки и проверки. Для магазина нужны собственная подпись, идентификатор и процесс выпуска. Сборщик не устанавливает APK автоматически. Можно добавить `--abi x86_64` для эмулятора или две опции `--abi` для двух архитектур. Обычная Canvas-оболочка не запрашивает разрешения; feature `webview` добавляет только `INTERNET`.
 
 Готовые сборки находятся в разделе Artifacts [успешного запуска CI](https://github.com/USBashka/Rusterize/actions/workflows/ci.yml). Для Linux/macOS используй вложенный `.tar.gz`: он сохраняет права запуска. Распаковать: `tar -xzf rusterize-gallery-linux.tar.gz` или `tar -xzf rusterize-gallery-macos.tar.gz`. macOS-приложение имеет локальную ad hoc подпись, без notarization Apple.
+
+## Музыка, изображения и локальные данные
+
+Опциональные features `audio`, `image-codecs` и `files` (вместе — `media`) добавляют MP3/WAV, несколько аудиоголосов, аудиочасы, PCM/спектр, PNG/JPEG, системный импорт/экспорт и постоянное хранилище. Загрузка и декодирование выполняются асинхронно через существующий `Event::NativeResult`.
+
+```sh
+python scripts/build.py --platform windows --package rusterize-media
+python scripts/build.py --platform web --package rusterize-media
+```
+
+[API и платформенные ограничения](docs/MEDIA.md) · [Проверки и размеры](docs/MEDIA_VALIDATION.md) · [Переход LyriXX](docs/LYRIXX_MIGRATION.md).
 
 ## Создать приложение
 
@@ -138,7 +149,7 @@ fn window_options(&self) -> rusterize::WindowOptions {
 
 Подробнее: [API](docs/API.md), [архитектура](docs/ARCHITECTURE.md), [формат команд и C ABI](docs/protocol.md). Для ИИ предназначен [SKILL.md](SKILL.md).
 
-Пример шейдеров: `python scripts/build.py --platform windows --package rusterize-shaders` (также Android, Linux и macOS). WGSL выполняется через системный OpenGL/OpenGL ES; результат передаётся в нативный Canvas как Image. Этот путь включает GPU readback и предназначен прежде всего для небольших эффектов. Без feature `shaders` зависимости и размер обычного приложения не растут.
+Пример шейдеров: `python scripts/build.py --platform windows --package rusterize-shaders` (также Android, Linux, macOS и веб). WGSL выполняется через системный OpenGL/OpenGL ES/WebGL 2. Для всех платформ реализована композиция без чтения результата шейдера в CPU. На Android аппаратный путь требует API 29+, аппаратного Canvas и EGLImage; Windows требует GL/D3D interop. При недоступном interop эти две платформы используют запасной путь через Image. Нативные Linux/macOS реализации пока не проверены запуском — см. [проверки](docs/VALIDATION.md) и [ограничения](docs/SHADERS.md). Ресурсный протокол RZ03 передаёт пиксели неизменяемых изображений только при загрузке и явно освобождает ресурсы. Feature `shaders` остаётся опциональной.
 
 ## Проверки
 

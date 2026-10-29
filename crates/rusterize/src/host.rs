@@ -9,6 +9,7 @@ pub const FAILED: u32 = 0x8000_0000;
 
 struct Entry<A: Application> {
     engine: Engine<A>,
+    encoder: protocol::Encoder,
     bytes: Vec<u8>,
     error: CString,
     failed: bool,
@@ -84,6 +85,7 @@ impl<A: Application> Host<A> {
         let error = engine.window_options().validate().err();
         let mut entry = Entry {
             engine,
+            encoder: protocol::Encoder::default(),
             bytes: Vec::new(),
             error: error
                 .as_ref()
@@ -99,6 +101,16 @@ impl<A: Application> Host<A> {
     }
     pub fn destroy(&mut self, id: u64) {
         self.entries.remove(&id);
+    }
+    /// Recover after the receiver clears its resource cache or skips a frame.
+    /// Invalidates the previous bytes; the next frame uploads every live resource.
+    pub fn reset_resources(&mut self, id: u64) -> u32 {
+        if let Some(entry) = self.entries.get_mut(&id).filter(|entry| !entry.failed) {
+            entry.encoder.reset();
+            entry.bytes.clear();
+            entry.engine.request_redraw();
+        }
+        self.status(id)
     }
     pub fn status(&self, id: u64) -> u32 {
         self.entries
@@ -136,7 +148,7 @@ impl<A: Application> Host<A> {
                 }
                 e.engine
                     .frame(time)
-                    .map(|s| protocol::encode(s, &mut e.bytes))
+                    .map(|s| e.encoder.encode(s, &mut e.bytes))
             };
             if let Err(error) = result {
                 e.bytes.clear();
@@ -233,6 +245,7 @@ pub fn decode_event(
         9 => Some(Event::Focus(detail != 0)),
         10 => Some(Event::Suspend),
         11 => Some(Event::Resume),
+        12 => Some(Event::AudioInterrupted),
         _ => None,
     }
 }
@@ -277,6 +290,12 @@ macro_rules! export_app {
                 }
                 #[cfg(not(all(target_arch="wasm32",target_os="unknown")))]
                 {
+                #[cfg(target_os="android")]
+                match $crate::android::submit(id, request_id, &request) {
+                    Ok(true) => continue,
+                    Err(error) => { RUSTERIZE_HOST.with(|h|h.borrow_mut().event(id,$crate::Event::NativeResult{id:request_id,result:Err(error)})); continue; }
+                    Ok(false) => {}
+                }
                 let result=$crate::native::execute_host_request(&request);
                 RUSTERIZE_HOST.with(|h|h.borrow_mut().event(id,$crate::Event::NativeResult{id:request_id,result}));
                 }
@@ -284,6 +303,11 @@ macro_rules! export_app {
             #[cfg(all(target_arch="wasm32",target_os="unknown"))]
             for _ in 0..64 {
                 let Some(event)=$crate::web::poll_result(id) else {break};
+                RUSTERIZE_HOST.with(|h|h.borrow_mut().event(id,event));
+            }
+            #[cfg(target_os="android")]
+            for _ in 0..64 {
+                let Some(event)=$crate::android::poll_result(id) else {break};
                 RUSTERIZE_HOST.with(|h|h.borrow_mut().event(id,event));
             }
             for _ in 0..64 {
@@ -302,11 +326,14 @@ macro_rules! export_app {
             RUSTERIZE_HOST.with(|h|h.borrow_mut().native_draw(id,&canvas)).map_or($crate::host::FAILED,|_|0)
         }
         #[no_mangle] pub extern "C" fn rusterize_destroy(id: u64) {
+            #[cfg(target_os="android")]
+            $crate::android::cancel(id);
             #[cfg(all(target_arch="wasm32",target_os="unknown"))]
             $crate::web::cancel(id);
             RUSTERIZE_HOST.with(|h| h.borrow_mut().destroy(id));
         }
         #[no_mangle] pub extern "C" fn rusterize_status(id: u64) -> u32 { RUSTERIZE_HOST.with(|h| h.borrow().status(id)) }
+        #[no_mangle] pub extern "C" fn rusterize_reset_resources(id: u64) -> u32 { RUSTERIZE_HOST.with(|h| h.borrow_mut().reset_resources(id)) }
         #[no_mangle] pub extern "C" fn rusterize_title(id:u64)->*const std::ffi::c_char {RUSTERIZE_HOST.with(|h|h.borrow().title(id).as_ptr())}
         #[no_mangle] pub extern "C" fn rusterize_window_option(id:u64,option:u32)->u32 {RUSTERIZE_HOST.with(|h|h.borrow().window_option(id,option))}
         #[no_mangle] pub extern "C" fn rusterize_event(id: u64, kind: u32, x: f32, y: f32, dx: f32, dy: f32, detail: u32, flags: u32) -> u32 {
@@ -338,8 +365,11 @@ macro_rules! __android_exports {
         pub extern "system" fn Java_dev_rusterize_RusterizeView_nativeCreate(
             mut env: $crate::jni::JNIEnv,
             class: $crate::jni::objects::JClass,
+            context: $crate::jni::objects::JObject,
         ) -> $crate::jni::sys::jlong {
-            if let Err(error) = $crate::android::install_service(&mut env, class) {
+            if let Err(error) = $crate::android::install_context(&mut env, &context)
+                .and_then(|_| $crate::android::install_service(&mut env, class))
+            {
                 let _ = env.throw_new("java/lang/IllegalStateException", error.to_string());
                 return 0;
             }
@@ -413,6 +443,14 @@ macro_rules! __android_exports {
             rusterize_status(id as u64) as i32
         }
         #[no_mangle]
+        pub extern "system" fn Java_dev_rusterize_RusterizeView_nativeResetResources(
+            _: $crate::jni::JNIEnv,
+            _: $crate::jni::objects::JClass,
+            id: i64,
+        ) -> i32 {
+            rusterize_reset_resources(id as u64) as i32
+        }
+        #[no_mangle]
         pub extern "system" fn Java_dev_rusterize_RusterizeView_nativeOption(
             _: $crate::jni::JNIEnv,
             _: $crate::jni::objects::JClass,
@@ -479,11 +517,41 @@ mod tests {
         let b = h.create(App);
         assert_ne!(a, b);
         assert_eq!(h.frame(a, Viewport::default(), 0.0), 0);
-        assert!(h.bytes(a).starts_with(b"RZ02"));
+        assert!(h.bytes(a).starts_with(b"RZ03"));
         h.destroy(a);
         h.destroy(a);
         assert_eq!(h.status(a), FAILED);
         assert_eq!(h.status(b), REDRAW);
         assert_eq!(h.frame(b, Viewport::new(f32::NAN, 1.0, 1.0), 0.0), FAILED);
+        assert_eq!(h.reset_resources(a), FAILED);
+        assert_eq!(h.reset_resources(b), FAILED);
+    }
+    #[test]
+    fn host_tracks_resources_per_application_and_recovers_after_cache_loss() {
+        struct ImageApp(Image);
+        impl Application for ImageApp {
+            fn draw(&mut self, canvas: &mut Canvas<'_>, _: Viewport) {
+                canvas.image(&self.0, Rect::new(0.0, 0.0, 1.0, 1.0), 1.0);
+            }
+        }
+        let image = Image::rgba(1, 1, vec![255; 4]).unwrap();
+        let mut host = Host::default();
+        let first = host.create(ImageApp(image.clone()));
+        let second = host.create(ImageApp(image));
+        let resource_count = |bytes: &[u8]| u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        assert_eq!(host.frame(first, Viewport::default(), 0.0), 0);
+        let snapshot = host.bytes(first).to_vec();
+        assert_eq!(resource_count(&snapshot), 1);
+        assert_eq!(host.frame(first, Viewport::default(), 1.0), 0);
+        assert_eq!(resource_count(host.bytes(first)), 0);
+        assert_eq!(host.frame(second, Viewport::default(), 1.0), 0);
+        assert_eq!(host.bytes(second), snapshot);
+        assert_eq!(host.reset_resources(first), REDRAW);
+        assert!(host.bytes(first).is_empty());
+        assert_eq!(host.status(first), REDRAW);
+        assert_eq!(host.frame(first, Viewport::default(), 2.0), 0);
+        assert_eq!(host.bytes(first), snapshot);
+        assert_eq!(host.frame(second, Viewport::default(), 2.0), 0);
+        assert_eq!(resource_count(host.bytes(second)), 0);
     }
 }
